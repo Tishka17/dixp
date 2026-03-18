@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+from typing import Any, Callable, Protocol
+
+from .graph import CallPlan, Registration
+from .models import RegistrationInfo, ServiceKey
+
+
+class CachePort(Protocol):
+    def get_or_create(self, token: object, factory: Callable[[], Any]) -> Any: ...
+
+    async def aget_or_create(self, token: object, factory: Callable[[], Any]) -> Any: ...
+
+    def close(self) -> None: ...
+
+    async def aclose(self) -> None: ...
+
+
+class RegistryPort(Protocol):
+    def root_keys(self) -> tuple[ServiceKey, ...]: ...
+
+    def can_resolve(self, key: ServiceKey) -> bool: ...
+
+    def catalog(self, *, include_dynamic: bool = False) -> tuple[RegistrationInfo, ...]: ...
+
+    def registration_for(self, key: ServiceKey, *, suppress_autowire_errors: bool) -> Registration | None: ...
+
+    def registrations_for_collection(
+        self,
+        key: ServiceKey,
+        *,
+        suppress_autowire_errors: bool,
+    ) -> tuple[Registration, ...]: ...
+
+    def invocation_plan(self, target: Callable[..., Any]) -> CallPlan: ...
+
+
+class InspectorPort(Protocol):
+    def validate(self, *roots: ServiceKey) -> None: ...
+
+    def explain(self, key: ServiceKey) -> str: ...

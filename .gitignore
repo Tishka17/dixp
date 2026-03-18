@@ -1,0 +1,19 @@
+# project generated files
+__pycache__/
+/docs-build/
+/dist/
+/build/
+/.ruff_cache/
+/.tox/
+.coverage
+*.egg-info
+src/dishka/_version.py
+
+# common utilities
+/venv
+/.venv
+.mypy_cache/
+.idea/
+.vscode/
+.venv/
+.DS_Store
