@@ -18,7 +18,6 @@ from ..core.metadata import ComponentSpec
 from ..core.models import (
     ActivationBinding,
     AutowirePolicy,
-    BuildPolicy,
     BuildProfile,
     DuplicatePolicy,
     InterceptorBinding,
@@ -31,7 +30,6 @@ from .declarative import (
     BindingSpec,
     InterceptorSpec,
     ModuleSpec,
-    PolicySpec,
 )
 from .registry import RegistrySnapshot
 
@@ -55,7 +53,6 @@ class GraphCompiler:
         self._multibind_counter = 0
         self._activations: list[ActivationBinding] = []
         self._interceptors: list[InterceptorBinding] = []
-        self._policies: list[BuildPolicy] = []
 
     def compile(self, entries: tuple[Any, ...]) -> RegistrySnapshot:
         for entry in entries:
@@ -66,10 +63,8 @@ class GraphCompiler:
             open_generic_bindings=dict(self._open_generic_bindings),
             activations=tuple(self._activations),
             interceptors=tuple(self._interceptors),
-            policy_names=tuple(type(policy).__name__ for policy in self._policies),
             autowire_policy=self._autowire_policy,
         )
-        self._validate_snapshot(snapshot)
         return snapshot
 
     def _apply_entry(self, entry: Any) -> None:
@@ -89,11 +84,6 @@ class GraphCompiler:
         if isinstance(entry, InterceptorSpec):
             self._apply_interceptor(entry)
             return
-        if isinstance(entry, PolicySpec):
-            self._policies.append(entry.policy)
-            self._rebuild_registrations()
-            return
-
         spec = getattr(entry, "__dixp_component__", None)
         if isinstance(spec, ComponentSpec):
             self._apply_component(entry, spec)
@@ -208,10 +198,16 @@ class GraphCompiler:
         if factory is not None:
             hints = get_type_hints(factory, include_extras=True)
             if "return" not in hints:
-                raise RegistrationError("Factory registration without a key requires a return type hint")
+                raise RegistrationError(
+                    "Factory registration without a key needs a return type hint. "
+                    "Add `-> ServiceType` to the factory or bind it explicitly with `app.bind(ServiceType).factory(...)`."
+                )
             dependency = dependency_from_annotation(hints["return"])
             if dependency is None:
-                raise RegistrationError("Factory return annotation is not a valid service key")
+                raise RegistrationError(
+                    "Factory return annotation is not a valid service key. "
+                    "Use a concrete type, protocol, or named key."
+                )
             return dependency
         if instance is not MISSING:
             return type(instance)
@@ -227,13 +223,9 @@ class GraphCompiler:
     def _validate_service_key(self, key: ServiceKey) -> None:
         if self._profile is BuildProfile.ENTERPRISE and isinstance(key, str):
             raise RegistrationError(
-                "Enterprise profile requires typed service keys; use qualified(...) or a dedicated token object"
+                "Safe mode requires typed service keys. "
+                "Use a class/protocol key, `named(Type, 'name')`, or a dedicated token object."
             )
-        for policy in self._policies:
-            try:
-                policy.validate_service_key(key)
-            except ValueError as exc:
-                raise RegistrationError(str(exc)) from exc
 
     def _store_registration(
         self,
@@ -250,11 +242,6 @@ class GraphCompiler:
         self._registrations[key] = registration
 
     def _validate_registration(self, registration: Registration) -> Registration:
-        for policy in self._policies:
-            try:
-                policy.validate_registration(registration)
-            except ValueError as exc:
-                raise RegistrationError(str(exc)) from exc
         return Registration(
             service_key=registration.service_key,
             graph_key=registration.graph_key,
@@ -268,15 +255,7 @@ class GraphCompiler:
             cache=registration.cache,
             activation_hooks=registration.activation_hooks,
             interceptors=registration.interceptors,
-            policies=tuple(type(policy).__name__ for policy in self._policies),
         )
-
-    def _validate_snapshot(self, snapshot: RegistrySnapshot) -> None:
-        for policy in self._policies:
-            try:
-                policy.validate_snapshot(snapshot)
-            except ValueError as exc:
-                raise RegistrationError(str(exc)) from exc
 
     def _rebuild_registrations(self) -> None:
         self._registrations = {
@@ -360,7 +339,6 @@ class GraphCompiler:
             cache=registration.cache,
             activation_hooks=registration.activation_hooks + (getattr(binding.hook, "__name__", type(binding.hook).__name__),),
             interceptors=registration.interceptors,
-            policies=registration.policies,
         )
 
     def _apply_interceptor_binding(self, registration: Registration, binding: InterceptorBinding) -> Registration:
@@ -418,7 +396,6 @@ class GraphCompiler:
             cache=registration.cache,
             activation_hooks=registration.activation_hooks,
             interceptors=registration.interceptors + (getattr(binding.interceptor, "__name__", type(binding.interceptor).__name__),),
-            policies=registration.policies,
         )
 
     def _build_registration(
@@ -455,7 +432,8 @@ class GraphCompiler:
                 implementation = key
             else:
                 raise RegistrationError(
-                    f"Registration for {describe_key(key)} requires implementation, factory, or instance"
+                    f"Registration for {describe_key(key)} needs an implementation, factory, or instance. "
+                    f"Try `app.bind({describe_key(key)}).to(...)`, `.factory(...)`, or `.instance(...)`."
                 )
 
         if implementation is not None:
@@ -499,7 +477,8 @@ class GraphCompiler:
         try:
             if not issubclass(implementation, key):
                 raise RegistrationError(
-                    f"{describe_key(implementation)} is not compatible with service {describe_key(key)}"
+                    f"{describe_key(implementation)} is not compatible with service {describe_key(key)}. "
+                    "Bind an implementation that matches the requested interface or change the service key."
                 )
         except TypeError:
             return
@@ -513,7 +492,8 @@ class GraphCompiler:
             return
         if dependency != key:
             raise RegistrationError(
-                f"Factory {describe_key(factory)} returns {describe_key(dependency)}, expected {describe_key(key)}"
+                f"Factory {describe_key(factory)} returns {describe_key(dependency)}, expected {describe_key(key)}. "
+                "Either fix the return annotation or bind the factory under the returned service key."
             )
 
     def _validate_open_generic(self, service_origin: ServiceKey, implementation_origin: type[Any]) -> None:

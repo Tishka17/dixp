@@ -274,7 +274,8 @@ def compile_call_plan(
         has_default = parameter.default is not inspect._empty
         if strict and request is None and not has_default:
             raise ResolutionError(
-                f"Cannot compile {description}: parameter {parameter.name!r} has no injectable type hint"
+                f"Cannot compile {description}: parameter {parameter.name!r} has no injectable type hint. "
+                "Add a type annotation, use `Annotated[..., Inject(...)]`, or give the parameter a default value."
             )
         parameters.append(
             ParameterPlan(
@@ -309,7 +310,6 @@ class Registration:
     cache: bool = True
     activation_hooks: tuple[str, ...] = ()
     interceptors: tuple[str, ...] = ()
-    policies: tuple[str, ...] = ()
 
     def resolve(self, resolver: Any, context: Any) -> Any:
         if not self.cache or self.lifetime is Lifetime.TRANSIENT:

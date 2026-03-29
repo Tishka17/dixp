@@ -18,7 +18,7 @@ from ..core.models import Factory, Lazy, Lifetime, Provider, RegistrationInfo, S
 from ..core.ports import CachePort, InspectorPort, RegistryPort
 from ..core.resolution import ResolutionContext
 from ..configuration.registry import RegistrySnapshot
-from ..inspection.graph import GraphInspector
+from ..inspection.graph import DoctorReport, GraphInspector
 from .cache import InstanceCache
 from .registry import RuntimeRegistry
 
@@ -35,13 +35,39 @@ class _Resolver:
     def _assert_open(self) -> None:
         return None
 
+    def _missing_registration_message(self, key: ServiceKey) -> str:
+        target = describe_key(key)
+        suggestions = [
+            f"add `@service(provides={target})` to an implementation",
+            f"wire it explicitly with `app.bind({target}).singleton(...)` or `.to(...)`",
+            f"or provide a concrete value with `app.bind({target}).value(...)`",
+        ]
+        if isinstance(key, str):
+            suggestions = [
+                "use a typed key instead of a bare string in app code",
+                f"or bind the string explicitly with `app.bind({key!r}).value(...)`",
+            ]
+        return f"No service for {target}. Try one of these fixes:\n- " + "\n- ".join(suggestions)
+
+    def __getitem__(self, key: ServiceKey) -> Any:
+        return self.get(key)
+
+    def __contains__(self, key: ServiceKey) -> bool:
+        return self.has(key)
+
     def resolve(self, key: ServiceKey) -> Any:
         self._assert_open()
         return self._resolve(key, ResolutionContext())
 
+    def get(self, key: ServiceKey) -> Any:
+        return self.resolve(key)
+
     async def aresolve(self, key: ServiceKey) -> Any:
         self._assert_open()
         return await self._aresolve(key, ResolutionContext())
+
+    async def aget(self, key: ServiceKey) -> Any:
+        return await self.aresolve(key)
 
     def try_resolve(self, key: ServiceKey, default: T | None = None) -> Any | T | None:
         self._assert_open()
@@ -49,23 +75,38 @@ class _Resolver:
             return default
         return self.resolve(key)
 
+    def maybe(self, key: ServiceKey, default: T | None = None) -> Any | T | None:
+        return self.try_resolve(key, default)
+
     def can_resolve(self, key: ServiceKey) -> bool:
         self._assert_open()
         return self._can_resolve(key)
+
+    def has(self, key: ServiceKey) -> bool:
+        return self.can_resolve(key)
 
     def invoke(self, target: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
         self._assert_open()
         plan = self._container._registry.invocation_plan(target)
         return plan.invoke(self, ResolutionContext(), args=args, kwargs=kwargs)
 
+    def call(self, target: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+        return self.invoke(target, *args, **kwargs)
+
     async def ainvoke(self, target: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
         self._assert_open()
         plan = self._container._registry.invocation_plan(target)
         return await plan.ainvoke(self, ResolutionContext(), args=args, kwargs=kwargs)
 
+    async def acall(self, target: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+        return await self.ainvoke(target, *args, **kwargs)
+
     def scope(self) -> "Scope":
         self._assert_open()
         return Scope(self._container, override_parent=self)
+
+    def child(self) -> "Scope":
+        return self.scope()
 
     @contextmanager
     def override(
@@ -103,7 +144,7 @@ class _Resolver:
             return self._resolve_collection(key, context)
         registration = self._find_registration(key, suppress_autowire_errors=False)
         if registration is None:
-            raise ResolutionError(f"No registration for {describe_key(key)}")
+            raise ResolutionError(self._missing_registration_message(key))
         nested_context = context.enter(registration.graph_key, registration.lifetime, display=registration.display)
         return registration.resolve(self, nested_context)
 
@@ -116,7 +157,7 @@ class _Resolver:
             return await self._aresolve_collection(key, context)
         registration = self._find_registration(key, suppress_autowire_errors=False)
         if registration is None:
-            raise ResolutionError(f"No registration for {describe_key(key)}")
+            raise ResolutionError(self._missing_registration_message(key))
         nested_context = context.enter(registration.graph_key, registration.lifetime, display=registration.display)
         return await registration.aresolve(self, nested_context)
 
@@ -167,9 +208,15 @@ class _Resolver:
         self._assert_open()
         return self._resolve_all(key, ResolutionContext())
 
+    def all(self, key: ServiceKey) -> tuple[Any, ...]:
+        return self.resolve_all(key)
+
     async def aresolve_all(self, key: ServiceKey) -> tuple[Any, ...]:
         self._assert_open()
         return await self._aresolve_all(key, ResolutionContext())
+
+    async def aall(self, key: ServiceKey) -> tuple[Any, ...]:
+        return await self.aresolve_all(key)
 
     def _resolve_collection(self, key: ServiceKey, context: ResolutionContext) -> Any:
         kind, item_key = collection_spec(key) or (None, None)
@@ -250,6 +297,10 @@ class Container(_Resolver):
     def explain(self, key: ServiceKey) -> str:
         self._assert_open()
         return self._inspector.explain(key)
+
+    def doctor(self, *roots: ServiceKey) -> DoctorReport:
+        self._assert_open()
+        return self._inspector.doctor(*roots)
 
     def _scoped_value(self, cache_token: object, factory: Callable[[], Any]) -> Any:
         return self._singleton_value(cache_token, factory)

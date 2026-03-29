@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from ..core.models import RegistrationInfo, ServiceKey
 from ..configuration.registry import RegistrySnapshot
-from ..inspection.graph import GraphInspector
+from ..inspection.graph import DoctorReport, GraphInspector
 from ..runtime.container import Container
 from ..runtime.registry import RuntimeRegistry
 
@@ -30,6 +30,10 @@ class CompiledGraph:
     def explain(self, key: ServiceKey) -> str:
         inspector = GraphInspector(RuntimeRegistry(self.snapshot))
         return inspector.explain(key)
+
+    def doctor(self, *roots: ServiceKey) -> DoctorReport:
+        inspector = GraphInspector(RuntimeRegistry(self.snapshot))
+        return inspector.doctor(*roots)
 
     def catalog(self, *, include_dynamic: bool = False) -> tuple[RegistrationInfo, ...]:
         registry = RuntimeRegistry(self.snapshot)

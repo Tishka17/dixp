@@ -2,13 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Generic, Hashable, Protocol, TypeVar
+from typing import Any, Awaitable, Callable, Generic, Hashable, Protocol, TypeVar
 
 ServiceKey = Hashable
 T = TypeVar("T")
-if TYPE_CHECKING:
-    from ..configuration.registry import RegistrySnapshot
-    from .graph import Registration
 
 
 class Lifetime(str, Enum):
@@ -54,8 +51,12 @@ class Inject:
     key: ServiceKey | None = None
 
     @classmethod
-    def qualified(cls, key: ServiceKey, name: str, *, namespace: str | None = None) -> "Inject":
+    def named(cls, key: ServiceKey, name: str, *, namespace: str | None = None) -> "Inject":
         return cls(key=qualified(key, name, namespace=namespace))
+
+    @classmethod
+    def qualified(cls, key: ServiceKey, name: str, *, namespace: str | None = None) -> "Inject":
+        return cls.named(key, name, namespace=namespace)
 
 
 class Provider(Generic[T]):
@@ -139,42 +140,3 @@ class ActivationBinding:
     hook: Callable[..., Any]
     ahook: Callable[..., Awaitable[Any]] | None = None
     order: int = 0
-
-
-class BuildPolicy(Protocol):
-    def validate_service_key(self, key: ServiceKey) -> None: ...
-
-    def validate_registration(self, registration: "Registration") -> None: ...
-
-    def validate_snapshot(self, snapshot: "RegistrySnapshot") -> None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class ForbidLifetimePolicy:
-    lifetime: Lifetime
-    message: str | None = None
-
-    def validate_service_key(self, key: ServiceKey) -> None:
-        return None
-
-    def validate_registration(self, registration: "Registration") -> None:
-        if registration.lifetime is self.lifetime:
-            raise ValueError(self.message or f"Lifetime {self.lifetime.value} is forbidden for {registration.display}")
-
-    def validate_snapshot(self, snapshot: "RegistrySnapshot") -> None:
-        return None
-
-
-@dataclass(frozen=True, slots=True)
-class RequireQualifierPolicy:
-    message: str = "Policy requires qualified service keys"
-
-    def validate_service_key(self, key: ServiceKey) -> None:
-        if not isinstance(key, Qualifier):
-            raise ValueError(self.message)
-
-    def validate_registration(self, registration: "Registration") -> None:
-        return None
-
-    def validate_snapshot(self, snapshot: "RegistrySnapshot") -> None:
-        return None

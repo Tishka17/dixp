@@ -11,13 +11,6 @@ class InjectableSpec:
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderSpec:
-    key: ServiceKey | None
-    lifetime: Lifetime
-    multiple: bool
-
-
-@dataclass(frozen=True, slots=True)
 class ComponentSpec:
     key: ServiceKey | None
     lifetime: Lifetime

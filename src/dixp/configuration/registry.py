@@ -15,7 +15,6 @@ class RegistrySnapshot:
     open_generic_bindings: Mapping[ServiceKey, OpenGenericBinding]
     activations: tuple[ActivationBinding, ...]
     interceptors: tuple[InterceptorBinding, ...]
-    policy_names: tuple[str, ...]
     autowire_policy: AutowirePolicy
 
     def __post_init__(self) -> None:
@@ -28,4 +27,3 @@ class RegistrySnapshot:
         object.__setattr__(self, "open_generic_bindings", MappingProxyType(dict(self.open_generic_bindings)))
         object.__setattr__(self, "activations", tuple(self.activations))
         object.__setattr__(self, "interceptors", tuple(self.interceptors))
-        object.__setattr__(self, "policy_names", tuple(self.policy_names))

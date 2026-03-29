@@ -1,39 +1,31 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
-import types
 import unittest
-from typing import Annotated, Generic, Protocol, TypeVar
+from typing import Annotated, Protocol
 
 from dixp import (
-    AutowirePolicy,
-    BuildProfile,
-    Builder,
+    App,
     CircularDependencyError,
-    DuplicatePolicy,
-    EnterpriseMode,
+    ContainerClosedError,
+    DoctorReport,
     Factory,
-    ForbidLifetimePolicy,
     Inject,
     Lazy,
     Lifetime,
     LifetimeMismatchError,
     Provider,
     RegistrationError,
-    RequireQualifierPolicy,
     ResolutionError,
+    SafeMode,
     StrictMode,
+    TestApp,
     ValidationError,
-    activate,
-    component,
-    contribute,
-    decorate,
-    instance,
-    module,
-    open_generic,
-    qualified,
+    bundle,
+    scoped,
+    service,
     singleton,
+    stub,
 )
 
 
@@ -41,7 +33,7 @@ class Clock(Protocol):
     def now(self) -> int: ...
 
 
-@component(as_=Clock, lifetime=Lifetime.SINGLETON)
+@service(provides=Clock, lifetime="singleton")
 class SystemClock:
     def now(self) -> int:
         return 42
@@ -52,14 +44,55 @@ class Repository:
         self.clock = clock
 
 
-@component(as_=Repository, lifetime=Lifetime.SCOPED)
-def build_repository(clock: Clock) -> Repository:
+@service(provides=Repository, lifetime="scoped")
+def make_repository(clock: Clock) -> Repository:
     return Repository(clock)
 
 
 class Service:
     def __init__(self, repository: Repository) -> None:
         self.repository = repository
+
+
+class Plugin(Protocol):
+    def name(self) -> str: ...
+
+
+class AlphaPlugin:
+    def name(self) -> str:
+        return "alpha"
+
+
+class BetaPlugin:
+    def name(self) -> str:
+        return "beta"
+
+
+class PluginConsumer:
+    def __init__(self, plugins: list[Plugin]) -> None:
+        self.plugins = plugins
+
+
+class SettingsConsumer:
+    def __init__(self, settings: Annotated[dict, Inject.named(dict, "main")]) -> None:
+        self.settings = settings
+
+
+class ProviderConsumer:
+    def __init__(self, clock_provider: Provider[Clock], repository_factory: Factory[Repository], lazy_clock: Lazy[Clock]) -> None:
+        self.clock_provider = clock_provider
+        self.repository_factory = repository_factory
+        self.lazy_clock = lazy_clock
+
+
+@service
+class ObservableService:
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+
+class TraceableRepository(Repository):
+    pass
 
 
 class ScopedDependency:
@@ -71,22 +104,14 @@ class SingletonDependsOnScoped:
         self.dep = dep
 
 
-class NamedConfigConsumer:
-    def __init__(self, config: Annotated[dict, Inject("config")]) -> None:
-        self.config = config
+class MissingDependency(Protocol):
+    def run(self) -> None: ...
 
 
-class QualifiedConfigConsumer:
-    def __init__(self, config: Annotated[dict, Inject.qualified(dict, "main")]) -> None:
-        self.config = config
-
-
-class Disposable:
-    def __init__(self) -> None:
-        self.closed = False
-
-    def close(self) -> None:
-        self.closed = True
+@service
+class MissingDependencyConsumer:
+    def __init__(self, missing: MissingDependency) -> None:
+        self.missing = missing
 
 
 class AsyncDisposable:
@@ -97,12 +122,12 @@ class AsyncDisposable:
         self.closed = True
 
 
-class CountingDisposable:
+class Disposable:
     def __init__(self) -> None:
-        self.close_count = 0
+        self.closed = False
 
     def close(self) -> None:
-        self.close_count += 1
+        self.closed = True
 
 
 class A:
@@ -115,606 +140,278 @@ class B:
         self.a = a
 
 
-class MissingDependency(Protocol):
-    def run(self) -> None: ...
+class AppApiTests(unittest.TestCase):
+    def test_app_uses_service_bundle_and_get(self) -> None:
+        app = App().include(bundle(SystemClock, make_repository))
+        container = app.start()
 
+        repository = container[Repository]
 
-class MissingDependencyConsumer:
-    def __init__(self, missing: MissingDependency) -> None:
-        self.missing = missing
+        self.assertIsInstance(repository.clock, SystemClock)
+        self.assertEqual(42, container[Clock].now())
 
+    def test_bind_supports_class_factory_and_instance(self) -> None:
+        class MessageBuilder:
+            def __init__(self, clock: Clock) -> None:
+                self.clock = clock
 
-class Plugin(Protocol):
-    def name(self) -> str: ...
+        def make_label(clock: Clock) -> str:
+            return f"t={clock.now()}"
 
+        app = (
+            App()
+            .bind(Clock).singleton(SystemClock)
+            .bind(MessageBuilder).to(MessageBuilder)
+            .bind(str).factory(make_label)
+            .bind(dict).value({"env": "test"})
+        )
+        container = app.start()
 
-@component(as_=Plugin, multiple=True)
-class AlphaPlugin:
-    def name(self) -> str:
-        return "alpha"
+        self.assertEqual(42, container.get(MessageBuilder).clock.now())
+        self.assertEqual("t=42", container.get(str))
+        self.assertEqual({"env": "test"}, container.get(dict))
 
+    def test_top_level_wiring_helpers_cover_common_cases(self) -> None:
+        def make_label(clock: Clock) -> str:
+            return f"t={clock.now()}"
 
-@component(as_=Plugin, multiple=True)
-class BetaPlugin:
-    def name(self) -> str:
-        return "beta"
+        app = (
+            App()
+            .singleton(Clock, SystemClock)
+            .factory(str, make_label)
+            .value(dict, {"env": "test"})
+            .many(Plugin, AlphaPlugin, BetaPlugin)
+        )
+        container = app.start()
 
+        self.assertEqual(42, container[Clock].now())
+        self.assertEqual("t=42", container[str])
+        self.assertEqual({"env": "test"}, container[dict])
+        self.assertEqual(["alpha", "beta"], [plugin.name() for plugin in container.all(Plugin)])
 
-class PluginConsumer:
-    def __init__(self, plugins: list[Plugin]) -> None:
-        self.plugins = plugins
+    def test_named_bindings_are_first_class(self) -> None:
+        container = App().value(dict, {"env": "prod"}, name="main").start()
 
+        consumer = container.get(SettingsConsumer)
 
-T = TypeVar("T")
+        self.assertEqual({"env": "prod"}, consumer.settings)
 
+    def test_many_bindings_resolve_as_list_and_tuple(self) -> None:
+        container = App().bind(Plugin).many(AlphaPlugin, BetaPlugin).start()
 
-class Serializer(Protocol[T]):
-    def dump(self, value: T) -> T: ...
-
-
-class IdentitySerializer(Generic[T]):
-    def dump(self, value: T) -> T:
-        return value
-
-
-class GenericRepository(Protocol[T]):
-    def save(self, value: T) -> T: ...
-
-
-class InMemoryRepository(Generic[T]):
-    def __init__(self, serializer: Serializer[T]) -> None:
-        self.serializer = serializer
-
-    def save(self, value: T) -> T:
-        return self.serializer.dump(value)
-
-
-class NumberService:
-    def __init__(self, repository: GenericRepository[int]) -> None:
-        self.repository = repository
-
-
-@component(lifetime=Lifetime.SINGLETON)
-class ManagedService:
-    def __init__(self) -> None:
-        self.value = "managed"
-
-
-class NeedsManagedService:
-    def __init__(self, service: ManagedService) -> None:
-        self.service = service
-
-
-class PlainService:
-    pass
-
-
-class ObservableService:
-    def __init__(self) -> None:
-        self.events: list[str] = []
-
-
-class ProviderConsumer:
-    def __init__(self, clock_provider: Provider[Clock], repository_factory: Factory[Repository], lazy_clock: Lazy[Clock]) -> None:
-        self.clock_provider = clock_provider
-        self.repository_factory = repository_factory
-        self.lazy_clock = lazy_clock
-
-
-class TraceableRepository(Repository):
-    pass
-
-
-def app_module() -> object:
-    return module(SystemClock, build_repository, instance("config", {"env": "module"}))
-
-
-def feature_toggle_module(env: str) -> object:
-    return module(instance("config", {"env": env}))
-
-
-class ContainerTests(unittest.TestCase):
-    def test_singleton_and_autowiring(self) -> None:
-        container = Builder().component(SystemClock).build()
-
-        first = container.resolve(Service)
-        second = container.resolve(Service)
-
-        self.assertIsInstance(first.repository.clock, SystemClock)
-        self.assertIs(first.repository.clock, second.repository.clock)
-        self.assertIsNot(first, second)
-
-    def test_scoped_lifetime_isolated_per_scope(self) -> None:
-        container = Builder().component(SystemClock).component(build_repository).build()
-
-        with container.scope() as left, container.scope() as right:
-            left_first = left.resolve(Repository)
-            left_second = left.resolve(Repository)
-            right_instance = right.resolve(Repository)
-
-        self.assertIs(left_first, left_second)
-        self.assertIsNot(left_first, right_instance)
-
-    def test_named_dependency_via_annotated_inject(self) -> None:
-        container = Builder().instance("config", {"env": "test"}).build()
-
-        consumer = container.resolve(NamedConfigConsumer)
-
-        self.assertEqual({"env": "test"}, consumer.config)
-
-    def test_qualified_bindings_provide_typed_named_keys(self) -> None:
-        token = qualified(dict, "main")
-        container = Builder().qualify(dict, "main", instance={"env": "typed"}, lifetime=Lifetime.SINGLETON).build()
-
-        consumer = container.resolve(QualifiedConfigConsumer)
-
-        self.assertEqual({"env": "typed"}, consumer.config)
-        self.assertEqual({"env": "typed"}, container.resolve(token))
-
-    def test_declarative_module_registration_collects_entries(self) -> None:
-        container = Builder().module(app_module()).build()
-
-        consumer = container.resolve(NamedConfigConsumer)
-
-        with container.scope() as left, container.scope() as right:
-            left_repository = left.resolve(Repository)
-            right_repository = right.resolve(Repository)
-
-        self.assertEqual({"env": "module"}, consumer.config)
-        self.assertIsInstance(left_repository.clock, SystemClock)
-        self.assertIs(left_repository.clock, right_repository.clock)
-        self.assertIsNot(left_repository, right_repository)
-
-    def test_parameterized_module_function_is_supported(self) -> None:
-        container = Builder().module(feature_toggle_module("prod")).build()
-
-        self.assertEqual({"env": "prod"}, container.resolve("config"))
-
-    def test_multibindings_resolve_as_collection(self) -> None:
-        container = Builder().add(contribute(Plugin, AlphaPlugin), contribute(Plugin, BetaPlugin)).build()
-
-        plugins = container.resolve(list[Plugin])
-        all_plugins = container.resolve_all(Plugin)
+        plugins = container.get(list[Plugin])
+        all_plugins = container.all(Plugin)
 
         self.assertEqual(["alpha", "beta"], [plugin.name() for plugin in plugins])
         self.assertEqual(["alpha", "beta"], [plugin.name() for plugin in all_plugins])
 
-    def test_component_multiple_contributes_to_multibindings(self) -> None:
-        container = Builder().module(module(AlphaPlugin, BetaPlugin)).build()
+    def test_bind_accepts_string_lifetime_for_more_pythonic_wiring(self) -> None:
+        container = App().bind(Clock).to(SystemClock, lifetime="singleton").start()
 
-        consumer = container.resolve(PluginConsumer)
+        self.assertEqual(42, container[Clock].now())
 
-        self.assertEqual(["alpha", "beta"], [plugin.name() for plugin in consumer.plugins])
+    def test_child_scope_isolated_for_scoped_services(self) -> None:
+        container = App().include(SystemClock, make_repository).start()
 
-    def test_empty_multibinding_collection_resolves_to_empty_list(self) -> None:
-        container = Builder().build()
+        with container.child() as left, container.child() as right:
+            left_first = left.get(Repository)
+            left_second = left.get(Repository)
+            right_repository = right.get(Repository)
 
-        self.assertEqual([], container.resolve(list[Plugin]))
+        self.assertIs(left_first, left_second)
+        self.assertIsNot(left_first, right_repository)
 
-    def test_open_generic_registration_specializes_dependencies(self) -> None:
-        container = Builder().add(
-            open_generic(Serializer, IdentitySerializer, lifetime=Lifetime.SINGLETON),
-            open_generic(GenericRepository, InMemoryRepository),
-        ).build()
+    def test_provider_factory_and_lazy_work_in_new_runtime_api(self) -> None:
+        container = App().include(SystemClock, make_repository).start()
 
-        repository = container.resolve(GenericRepository[int])
-        service = container.resolve(NumberService)
-
-        self.assertEqual(5, repository.save(5))
-        self.assertEqual(7, service.repository.save(7))
-
-    def test_validate_accepts_closed_generic_root(self) -> None:
-        Builder().add(
-            open_generic(Serializer, IdentitySerializer, lifetime=Lifetime.SINGLETON),
-            open_generic(GenericRepository, InMemoryRepository),
-        ).validate(GenericRepository[int])
-
-    def test_builder_supports_single_multi_and_open_generic_bindings(self) -> None:
-        container = (
-            Builder()
-            .component(SystemClock)
-            .contribute(Plugin, AlphaPlugin)
-            .contribute(Plugin, BetaPlugin)
-            .open_generic(Serializer, IdentitySerializer, lifetime=Lifetime.SINGLETON)
-            .build()
-        )
-
-        self.assertEqual(42, container.resolve(Clock).now())
-        self.assertEqual(["alpha", "beta"], [plugin.name() for plugin in container.resolve(list[Plugin])])
-        self.assertEqual(3, container.resolve(Serializer[int]).dump(3))
-
-    def test_provider_factory_and_lazy_injection_are_first_class(self) -> None:
-        container = Builder().component(SystemClock).build()
-
-        consumer = container.resolve(ProviderConsumer)
+        consumer = container.get(ProviderConsumer)
 
         self.assertEqual(42, consumer.clock_provider.get().now())
         self.assertEqual(42, consumer.repository_factory().clock.now())
         self.assertEqual(42, consumer.lazy_clock.value.now())
 
-    def test_provider_factory_and_lazy_can_be_resolved_directly(self) -> None:
-        container = Builder().component(SystemClock).build()
-
-        clock_provider = container.resolve(Provider[Clock])
-        repository_factory = container.resolve(Factory[Repository])
-        lazy_clock = container.resolve(Lazy[Clock])
-
-        self.assertEqual(42, clock_provider.get().now())
-        self.assertEqual(42, repository_factory().clock.now())
-        self.assertEqual(42, lazy_clock.value.now())
-
-    def test_diagnostics_understand_provider_requests(self) -> None:
-        container = Builder().component(SystemClock).build()
-
-        explanation = container.explain(Provider[Clock])
-        container.validate(Provider[Clock])
-
-        self.assertIn("Provider", explanation)
-        self.assertIn("Clock", explanation)
-
-    def test_component_metadata_controls_lifetime(self) -> None:
-        container = Builder().component(ManagedService).build()
-
-        first = container.resolve(ManagedService)
-        second = container.resolve(NeedsManagedService).service
-
-        self.assertIs(first, second)
-
-    def test_annotated_autowire_policy_requires_component_metadata(self) -> None:
-        container = (
-            Builder(autowire_policy=AutowirePolicy.ANNOTATED)
-            .component(ManagedService)
-            .component(NeedsManagedService)
-            .build()
-        )
-
-        self.assertEqual("managed", container.resolve(NeedsManagedService).service.value)
-        with self.assertRaises(ResolutionError):
-            container.resolve(PlainService)
-
-    def test_strict_profile_disables_implicit_autowiring(self) -> None:
-        container = Builder().use(StrictMode).component(SystemClock).build()
-
-        with self.assertRaises(ResolutionError):
-            container.resolve(Repository)
-
-    def test_enterprise_profile_validates_on_build_by_default(self) -> None:
-        builder = Builder().use(EnterpriseMode).component(MissingDependencyConsumer)
-
-        with self.assertRaises(ValidationError):
-            builder.build()
-
-    def test_enterprise_profile_rejects_bare_string_keys(self) -> None:
-        with self.assertRaises(RegistrationError):
-            Builder().use(EnterpriseMode).instance("config", {"env": "prod"}).compile()
-
-    def test_custom_policy_can_forbid_lifetimes(self) -> None:
-        with self.assertRaises(RegistrationError):
-            Builder().policy(ForbidLifetimePolicy(Lifetime.SINGLETON)).component(SystemClock).compile()
-
-    def test_custom_policy_can_require_qualifiers(self) -> None:
-        with self.assertRaises(RegistrationError):
-            Builder().policy(RequireQualifierPolicy()).component(SystemClock).compile()
-
-        Builder().policy(RequireQualifierPolicy()).qualify(
-            Clock,
-            "main",
-            implementation=SystemClock,
-            lifetime=Lifetime.SINGLETON,
-        ).compile()
-
-    def test_interceptor_can_wrap_explicit_registration(self) -> None:
-        container = (
-            Builder()
-            .component(SystemClock)
-            .component(build_repository)
-            .decorate(Repository, lambda instance, *, key, lifetime: TraceableRepository(instance.clock))
-            .build()
-        )
-
-        repository = container.resolve(Repository)
-
-        self.assertIsInstance(repository, TraceableRepository)
-        self.assertEqual(42, repository.clock.now())
-
-    def test_interceptor_can_wrap_dynamic_autowire_registration(self) -> None:
-        container = (
-            Builder()
-            .component(SystemClock)
-            .decorate(Repository, lambda instance, *, key, lifetime: TraceableRepository(instance.clock))
-            .build()
-        )
-
-        service = container.resolve(Service)
-
-        self.assertIsInstance(service.repository, TraceableRepository)
-
-    def test_interceptor_can_target_by_predicate(self) -> None:
-        container = (
-            Builder()
-            .component(SystemClock)
-            .decorate_where(
-                lambda key, lifetime: key is Clock and lifetime is Lifetime.SINGLETON,
-                lambda instance, *, key, lifetime: type("DecoratedClock", (), {"now": lambda self: instance.now() + 1})(),
-            )
-            .build()
-        )
-
-        self.assertEqual(43, container.resolve(Clock).now())
-
-    def test_activation_hook_is_applied_before_interceptors_even_if_added_later(self) -> None:
-        def intercept_instance(instance: ObservableService, *, key, lifetime) -> ObservableService:
-            instance.events.append("intercepted")
-            return instance
-
-        def activate_instance(instance: ObservableService, *, key, lifetime) -> None:
-            instance.events.append("activated")
-
-        container = (
-            Builder()
-            .component(ObservableService)
-            .decorate(ObservableService, intercept_instance)
-            .activate(ObservableService, activate_instance)
-            .build()
-        )
-
-        service = container.resolve(ObservableService)
-
-        self.assertEqual(["activated", "intercepted"], service.events)
-
-    def test_activation_hook_can_wrap_dynamic_autowire_registration(self) -> None:
-        def activate_repository(instance: Repository, *, key, lifetime) -> None:
-            instance.activated = True
-
-        container = Builder().component(SystemClock).activate(Repository, activate_repository).build()
-
-        service = container.resolve(Service)
-
-        self.assertTrue(service.repository.activated)
-
-    def test_interceptors_follow_declared_order(self) -> None:
-        def late(instance: ObservableService, *, key, lifetime) -> ObservableService:
-            instance.events.append("late")
-            return instance
-
-        def early(instance: ObservableService, *, key, lifetime) -> ObservableService:
-            instance.events.append("early")
-            return instance
-
-        container = (
-            Builder()
-            .component(ObservableService)
-            .decorate(ObservableService, late, order=20)
-            .decorate(ObservableService, early, order=10)
-            .build()
-        )
-
-        service = container.resolve(ObservableService)
-
-        self.assertEqual(["early", "late"], service.events)
-
-    def test_catalog_and_explain_provide_diagnostics(self) -> None:
-        compiled = (
-            Builder()
-            .component(SystemClock)
-            .contribute(Plugin, AlphaPlugin)
-            .open_generic(Serializer, IdentitySerializer, lifetime=Lifetime.SINGLETON)
-            .compile()
-        )
-
-        catalog = compiled.catalog()
-        explanation = compiled.explain(list[Plugin])
-
-        self.assertTrue(any(item.kind == "single" and item.key is Clock for item in catalog))
-        self.assertTrue(any(item.kind == "multi" and item.key is Plugin for item in catalog))
-        self.assertTrue(any(item.kind == "open_generic" and item.key is Serializer for item in catalog))
-        self.assertIn("list[test_container.Plugin]", explanation)
-        self.assertIn("test_container.Plugin[0]", explanation)
-
-    def test_catalog_can_include_dynamic_runtime_registrations(self) -> None:
-        container = Builder().component(SystemClock).open_generic(Serializer, IdentitySerializer, lifetime=Lifetime.SINGLETON).build()
-
-        container.resolve(Repository)
-        container.resolve(Serializer[int])
-        catalog = container.catalog(include_dynamic=True)
-
-        self.assertTrue(any(item.kind == "autowire" and item.key is Repository for item in catalog))
-        self.assertTrue(any(item.kind == "closed_generic" and item.key == Serializer[int] for item in catalog))
-
-    def test_explain_shows_policies_activations_and_interceptors(self) -> None:
-        token = qualified(Clock, "main")
-
-        def activate_clock(instance: Clock, *, key, lifetime) -> None:
-            return None
-
-        def wrap_clock(instance: Clock, *, key, lifetime) -> Clock:
-            return instance
-
-        container = (
-            Builder()
-            .policy(RequireQualifierPolicy())
-            .qualify(Clock, "main", implementation=SystemClock, lifetime=Lifetime.SINGLETON)
-            .activate(token, activate_clock)
-            .decorate(token, wrap_clock)
-            .build()
-        )
-
-        explanation = container.explain(token)
-
-        self.assertIn("policies: RequireQualifierPolicy", explanation)
-        self.assertIn("activations: activate_clock", explanation)
-        self.assertIn("interceptors: wrap_clock", explanation)
-
-    def test_compiled_graph_exposes_immutable_registry_boundary(self) -> None:
-        compiled = Builder().component(SystemClock).compile()
-
-        self.assertIsInstance(compiled.snapshot.registrations, types.MappingProxyType)
-        with self.assertRaises(TypeError):
-            compiled.snapshot.registrations[Clock] = object()
-
-    def test_layered_packages_expose_common_entry_points(self) -> None:
-        api = importlib.import_module("dixp.api")
-        configuration = importlib.import_module("dixp.configuration")
-        runtime = importlib.import_module("dixp.runtime")
-        inspection = importlib.import_module("dixp.inspection")
-        core = importlib.import_module("dixp.core")
-
-        self.assertIs(api.Builder, Builder)
-        self.assertIs(configuration.Builder, Builder)
-        self.assertTrue(hasattr(runtime, "RuntimeRegistry"))
-        self.assertTrue(hasattr(inspection, "GraphInspector"))
-        self.assertTrue(hasattr(core, "RegistryPort"))
-
-    def test_invoke_injects_missing_parameters(self) -> None:
-        container = Builder().component(SystemClock).build()
+    def test_call_and_maybe_are_shortcuts_for_runtime_usage(self) -> None:
+        container = App().include(SystemClock, make_repository).start()
 
         def handler(repository: Repository, flag: bool = False) -> tuple[int, bool]:
             return repository.clock.now(), flag
 
-        self.assertEqual((42, False), container.invoke(handler))
-        self.assertEqual((42, True), container.invoke(handler, flag=True))
+        self.assertEqual((42, False), container.call(handler))
+        self.assertEqual((42, True), container.call(handler, flag=True))
+        self.assertEqual("fallback", container.maybe("missing", "fallback"))
+        self.assertTrue(container.has(Clock))
+        self.assertIn(Clock, container)
 
-    def test_override_is_scoped_and_restores_original_registration(self) -> None:
-        container = Builder().component(SystemClock).build()
+    def test_hooks_are_readable_and_apply_in_order(self) -> None:
+        def activate(instance: ObservableService, *, key, lifetime) -> None:
+            instance.events.append("activated")
 
+        def wrap(instance: ObservableService, *, key, lifetime) -> ObservableService:
+            instance.events.append("wrapped")
+            return instance
+
+        container = App().include(ObservableService).on(ObservableService).wrap(wrap).on(ObservableService).init(activate).start()
+
+        self.assertEqual(["activated", "wrapped"], container.get(ObservableService).events)
+
+    def test_predicate_hooks_work_for_cross_cutting_rules(self) -> None:
+        container = (
+            App()
+            .include(SystemClock)
+            .when(lambda key, lifetime: key is Clock and lifetime is Lifetime.SINGLETON)
+            .wrap(lambda instance, *, key, lifetime: type("DecoratedClock", (), {"now": lambda self: instance.now() + 1})())
+            .start()
+        )
+
+        self.assertEqual(43, container.get(Clock).now())
+
+    def test_blueprint_is_the_inspection_boundary(self) -> None:
+        blueprint = App().include(SystemClock).bind(Plugin).many(AlphaPlugin).freeze()
+
+        catalog = blueprint.catalog()
+        explanation = blueprint.explain(list[Plugin])
+
+        self.assertTrue(any(item.key is Clock for item in catalog))
+        self.assertTrue(any(item.key is Plugin for item in catalog))
+        self.assertIn("Plugin", explanation)
+
+    def test_doctor_produces_readable_health_report(self) -> None:
+        report = App().include(SystemClock, make_repository).doctor()
+
+        self.assertIsInstance(report, DoctorReport)
+        self.assertTrue(report.ok)
+        self.assertTrue(report)
+        self.assertIn("dixp doctor", str(report))
+        self.assertIn("validation passed", str(report))
+
+    def test_doctor_collects_validation_errors(self) -> None:
+        report = App().use(SafeMode).include(MissingDependencyConsumer).doctor()
+
+        self.assertFalse(report.ok)
+        self.assertTrue(report.errors)
+        self.assertIn("Missing registration", report.errors[0])
+
+    def test_safe_mode_validates_on_start(self) -> None:
+        app = App().use(SafeMode).include(MissingDependencyConsumer)
+
+        with self.assertRaises(ValidationError):
+            app.start()
+
+    def test_strict_mode_disables_implicit_autowiring(self) -> None:
+        container = App().use(StrictMode).include(SystemClock).start()
+
+        with self.assertRaises(ResolutionError):
+            container.get(Repository)
+
+    def test_override_restores_original_binding(self) -> None:
+        container = App().include(SystemClock).start()
         fake_clock = type("FakeClock", (), {"now": lambda self: 7})()
 
         with container.override(Clock, fake_clock):
-            overridden = container.resolve(Repository)
-            self.assertEqual(7, overridden.clock.now())
+            self.assertEqual(7, container.get(Clock).now())
 
-        original = container.resolve(Repository)
-        self.assertEqual(42, original.clock.now())
+        self.assertEqual(42, container.get(Clock).now())
 
-    def test_circular_dependency_detected(self) -> None:
-        container = Builder().build()
+    def test_test_app_can_replace_services_with_instances(self) -> None:
+        fake_clock = stub(name="FakeClock", now=lambda: 7)
+        test_app = App().include(SystemClock, make_repository).test().with_instance(Clock, fake_clock)
 
-        with self.assertRaises(CircularDependencyError):
-            container.resolve(A)
+        self.assertIsInstance(test_app, TestApp)
+        self.assertEqual(7, test_app.start().get(Clock).now())
 
-    def test_singleton_cannot_capture_scoped_dependency(self) -> None:
-        container = Builder().scoped(ScopedDependency).singleton(SingletonDependsOnScoped).build()
+    def test_test_app_can_replace_services_with_stubs(self) -> None:
+        container = App().include(SystemClock, make_repository).test().with_stub(Clock, now=lambda: 9).start()
 
-        with self.assertRaises(LifetimeMismatchError):
-            container.resolve(SingletonDependsOnScoped)
+        self.assertEqual(9, container.get(Clock).now())
+        self.assertEqual(9, container.get(Repository).clock.now())
 
-    def test_try_resolve_returns_default_for_missing_dependency(self) -> None:
-        container = Builder().build()
+    def test_test_app_can_override_named_services(self) -> None:
+        container = App().value(dict, {"env": "prod"}, name="main").test().with_instance(
+            dict,
+            {"env": "test"},
+            name="main",
+        ).start()
 
-        self.assertEqual("fallback", container.try_resolve("missing", "fallback"))
+        self.assertEqual({"env": "test"}, container.get(SettingsConsumer).settings)
 
-    def test_close_disposes_cached_instances(self) -> None:
-        container = Builder().singleton(Disposable).build()
+    def test_stub_supports_attributes_and_zero_arg_methods(self) -> None:
+        fake = stub(name="ClockStub", now=lambda: 123, label="dev")
 
-        instance = container.resolve(Disposable)
-        container.close()
+        self.assertEqual(123, fake.now())
+        self.assertEqual("dev", fake.label)
+        self.assertEqual("<ClockStub>", repr(fake))
 
-        self.assertTrue(instance.closed)
+    def test_stub_supports_methods_with_arguments(self) -> None:
+        fake = stub(name="GreeterStub", greet=lambda name: f"hi {name}")
 
-    def test_alias_does_not_double_dispose_shared_singleton(self) -> None:
-        shared = CountingDisposable()
-        container = (
-            Builder()
-            .instance(CountingDisposable, shared)
-            .alias("shared", CountingDisposable, lifetime=Lifetime.SINGLETON)
-            .build()
-        )
+        self.assertEqual("hi dixp", fake.greet("dixp"))
 
-        self.assertIs(shared, container.resolve(CountingDisposable))
-        self.assertIs(shared, container.resolve("shared"))
+    def test_decorator_shortcuts_read_naturally(self) -> None:
+        class Token(Protocol):
+            def value(self) -> str: ...
 
-        container.close()
+        @singleton(provides=Token)
+        class DefaultToken:
+            def value(self) -> str:
+                return "singleton"
 
-        self.assertEqual(1, shared.close_count)
+        @scoped(provides=Repository)
+        def build_scoped_repository(clock: Clock) -> Repository:
+            return Repository(clock)
 
-    def test_closed_container_rejects_further_usage(self) -> None:
-        container = Builder().component(Disposable).build()
+        container = App().include(SystemClock, DefaultToken, build_scoped_repository).start()
 
-        container.resolve(Disposable)
-        container.close()
+        self.assertEqual("singleton", container[Token].value())
+        with container.child() as left, container.child() as right:
+            self.assertIsNot(left[Repository], right[Repository])
 
-        from dixp import ContainerClosedError
-
-        with self.assertRaises(ContainerClosedError):
-            container.resolve(Disposable)
-        with self.assertRaises(ContainerClosedError):
-            container.scope()
-
-    def test_duplicate_registration_is_rejected_by_default(self) -> None:
-        builder = Builder().component(SystemClock)
-
-        with self.assertRaises(RegistrationError):
-            builder.component(SystemClock).compile()
-
-    def test_duplicate_registration_can_be_replaced_explicitly(self) -> None:
-        class AlternateClock:
-            def now(self) -> int:
-                return 99
-
-        container = (
-            Builder(duplicate_policy=DuplicatePolicy.REPLACE)
-            .component(SystemClock)
-            .singleton(Clock, AlternateClock)
-            .build()
-        )
-
-        self.assertEqual(99, container.resolve(Clock).now())
-
-    def test_validate_detects_invalid_graph_before_runtime(self) -> None:
-        builder = Builder().component(MissingDependencyConsumer)
-
-        with self.assertRaises(ValidationError) as error:
-            builder.compile(validate=True)
-
-        self.assertIn("Missing registration", str(error.exception))
-
-    def test_async_factory_and_async_close(self) -> None:
-        async def create_resource(clock: Clock) -> AsyncDisposable:
+    def test_async_runtime_methods_work_with_new_names(self) -> None:
+        async def build_resource(clock: Clock) -> AsyncDisposable:
             self.assertEqual(42, clock.now())
             return AsyncDisposable()
 
-        container = Builder().component(SystemClock).singleton(AsyncDisposable, factory=create_resource).build()
+        container = App().include(SystemClock).bind(AsyncDisposable).factory(build_resource, lifetime=Lifetime.SINGLETON).start()
 
         async def scenario() -> None:
-            first = await container.aresolve(AsyncDisposable)
-            second = await container.aresolve(AsyncDisposable)
+            first = await container.aget(AsyncDisposable)
+            second = await container.aget(AsyncDisposable)
             self.assertIs(first, second)
             await container.aclose()
             self.assertTrue(first.closed)
 
         asyncio.run(scenario())
 
-    def test_ainvoke_supports_async_handlers(self) -> None:
-        container = Builder().component(SystemClock).build()
+    def test_close_still_closes_runtime_and_rejects_further_usage(self) -> None:
+        container = App().bind(Disposable).to(Disposable, lifetime=Lifetime.SINGLETON).start()
 
-        async def handler(repository: Repository) -> int:
-            await asyncio.sleep(0)
-            return repository.clock.now()
+        instance = container.get(Disposable)
+        container.close()
 
-        result = asyncio.run(container.ainvoke(handler))
+        self.assertTrue(instance.closed)
+        with self.assertRaises(ContainerClosedError):
+            container.get(Disposable)
 
-        self.assertEqual(42, result)
+    def test_graph_errors_are_unchanged_under_new_api(self) -> None:
+        with self.assertRaises(CircularDependencyError):
+            App().start().get(A)
 
-    def test_sync_api_rejects_async_provider(self) -> None:
-        async def create_resource() -> AsyncDisposable:
-            return AsyncDisposable()
+        with self.assertRaises(LifetimeMismatchError):
+            App().bind(ScopedDependency).to(ScopedDependency, lifetime=Lifetime.SCOPED).bind(
+                SingletonDependsOnScoped
+            ).to(SingletonDependsOnScoped, lifetime=Lifetime.SINGLETON).start().get(SingletonDependsOnScoped)
 
-        container = Builder().singleton(AsyncDisposable, factory=create_resource).build()
+    def test_safe_mode_rejects_bare_string_keys(self) -> None:
+        with self.assertRaises(RegistrationError):
+            App().use(SafeMode).bind("config").instance({"env": "prod"}).freeze()
 
-        with self.assertRaises(ResolutionError):
-            container.resolve(AsyncDisposable)
-
-    def test_resolution_error_for_untyped_required_parameter(self) -> None:
-        class Invalid:
-            def __init__(self, dependency) -> None:
-                self.dependency = dependency
-
-        container = Builder().build()
-
+    def test_missing_service_error_suggests_next_steps(self) -> None:
         with self.assertRaises(ResolutionError) as error:
-            container.resolve(Invalid)
+            App().start().get(Clock)
 
-        self.assertIn("no injectable type hint", str(error.exception))
+        message = str(error.exception)
+        self.assertIn("No service for", message)
+        self.assertIn("@service", message)
+        self.assertIn("app.bind", message)
 
 
 if __name__ == "__main__":

@@ -1,32 +1,23 @@
 from __future__ import annotations
 
-import inspect
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Protocol
+from typing import Any, Callable
 
 from ..core.graph import MISSING
-from ..core.metadata import ComponentSpec
-from ..core.models import AutowirePolicy, BuildPolicy, BuildProfile, DuplicatePolicy, Lifetime, ServiceKey, qualified
+from ..core.models import AutowirePolicy, BuildProfile, DuplicatePolicy, Lifetime, ServiceKey
 from .compiler import GraphCompiler
 from .compiled import CompiledGraph
 from .declarative import (
     BindingSpec,
     ModuleSpec,
     activate,
-    alias,
     contribute,
     decorate,
     module as declarative_module,
-    open_generic,
-    policy,
     scoped,
     singleton,
     transient,
 )
-
-
-class Bundle(Protocol):
-    def apply(self, builder: "Builder") -> "Builder": ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,12 +34,6 @@ class ProfileBundle:
 
 StrictMode = ProfileBundle(BuildProfile.STRICT)
 EnterpriseMode = ProfileBundle(BuildProfile.ENTERPRISE)
-
-
-def _component_spec(target: Any) -> ComponentSpec | None:
-    return getattr(target, "__dixp_component__", None)
-
-
 @dataclass(frozen=True, slots=True)
 class Builder:
     entries: tuple[Any, ...] = ()
@@ -59,10 +44,10 @@ class Builder:
     def add(self, *entries: Any) -> "Builder":
         return replace(self, entries=self.entries + tuple(entries))
 
-    def use(self, bundle: Bundle | Callable[["Builder"], "Builder"]) -> "Builder":
-        if hasattr(bundle, "apply"):
-            return bundle.apply(self)  # type: ignore[return-value]
-        return bundle(self)
+    def use(self, mode: Callable[["Builder"], "Builder"] | Any) -> "Builder":
+        if hasattr(mode, "apply"):
+            return mode.apply(self)  # type: ignore[return-value]
+        return mode(self)
 
     def strict(self) -> "Builder":
         return replace(self, profile=BuildProfile.STRICT)
@@ -112,49 +97,6 @@ class Builder:
     ) -> "Builder":
         return self.add(contribute(key, implementation, factory=factory))
 
-    def qualify(
-        self,
-        key: ServiceKey,
-        name: str,
-        *,
-        namespace: str | None = None,
-        implementation: type[Any] | None = None,
-        factory: Callable[..., Any] | None = None,
-        instance: Any = MISSING,
-        lifetime: Lifetime = Lifetime.TRANSIENT,
-        replace: bool | None = None,
-    ) -> "Builder":
-        return self.add(
-            BindingSpec(
-                key=qualified(key, name, namespace=namespace),
-                implementation=implementation,
-                factory=factory,
-                instance=instance,
-                lifetime=lifetime,
-                replace=replace,
-            )
-        )
-
-    def contribute_qualified(
-        self,
-        key: ServiceKey,
-        name: str,
-        *,
-        namespace: str | None = None,
-        implementation: type[Any] | None = None,
-        factory: Callable[..., Any] | None = None,
-        lifetime: Lifetime = Lifetime.TRANSIENT,
-    ) -> "Builder":
-        return self.add(
-            BindingSpec(
-                key=qualified(key, name, namespace=namespace),
-                implementation=implementation,
-                factory=factory,
-                lifetime=lifetime,
-                multiple=True,
-            )
-        )
-
     def alias(
         self,
         key: ServiceKey,
@@ -163,61 +105,9 @@ class Builder:
         lifetime: Lifetime = Lifetime.TRANSIENT,
         replace: bool | None = None,
     ) -> "Builder":
+        from .declarative import alias
+
         return self.add(alias(key, target, lifetime=lifetime, replace=replace))
-
-    def open_generic(
-        self,
-        key: ServiceKey,
-        implementation: type[Any],
-        *,
-        lifetime: Lifetime = Lifetime.TRANSIENT,
-        replace: bool | None = None,
-    ) -> "Builder":
-        return self.add(open_generic(key, implementation, lifetime=lifetime, replace=replace))
-
-    def policy(self, rule: BuildPolicy) -> "Builder":
-        return self.add(policy(rule))
-
-    def component(
-        self,
-        target: type[Any] | Callable[..., Any],
-        *,
-        as_: ServiceKey | None = None,
-        lifetime: Lifetime | None = None,
-        multiple: bool | None = None,
-        replace: bool | None = None,
-    ) -> "Builder":
-        spec = _component_spec(target)
-        key = as_
-        resolved_lifetime = lifetime
-        resolved_multiple = multiple
-        if spec is not None:
-            if key is None:
-                key = spec.key
-            if resolved_lifetime is None:
-                resolved_lifetime = spec.lifetime
-            if resolved_multiple is None:
-                resolved_multiple = spec.multiple
-        resolved_lifetime = resolved_lifetime or Lifetime.TRANSIENT
-        resolved_multiple = bool(resolved_multiple)
-
-        if inspect.isclass(target):
-            binding = BindingSpec(
-                key=key or target,
-                implementation=target,
-                lifetime=resolved_lifetime,
-                multiple=resolved_multiple,
-                replace=replace,
-            )
-        else:
-            binding = BindingSpec(
-                key=key,
-                factory=target,
-                lifetime=resolved_lifetime,
-                multiple=resolved_multiple,
-                replace=replace,
-            )
-        return self.add(binding)
 
     def module(self, *entries: Any, name: str | None = None) -> "Builder":
         if len(entries) == 1 and isinstance(entries[0], ModuleSpec) and name is None:
@@ -268,9 +158,6 @@ class Builder:
 
         return self.add(decorate_where(predicate, interceptor, ainterceptor=ainterceptor, order=order))
 
-    def pipeline(self, key: ServiceKey) -> "ServicePipeline":
-        return ServicePipeline(self, key)
-
     def compile(self, *, validate: bool | None = None) -> CompiledGraph:
         compiler = GraphCompiler(
             duplicate_policy=self.duplicate_policy,
@@ -289,27 +176,3 @@ class Builder:
     def validate(self, *roots: ServiceKey) -> "Builder":
         self.compile(validate=False).validate(*roots)
         return self
-
-
-@dataclass(frozen=True, slots=True)
-class ServicePipeline:
-    builder: Builder
-    key: ServiceKey
-
-    def activate(
-        self,
-        hook: Callable[..., Any],
-        *,
-        ahook: Callable[..., Any] | None = None,
-        order: int = 0,
-    ) -> Builder:
-        return self.builder.activate(self.key, hook, ahook=ahook, order=order)
-
-    def decorate(
-        self,
-        interceptor: Callable[..., Any],
-        *,
-        ainterceptor: Callable[..., Any] | None = None,
-        order: int = 0,
-    ) -> Builder:
-        return self.builder.decorate(self.key, interceptor, ainterceptor=ainterceptor, order=order)

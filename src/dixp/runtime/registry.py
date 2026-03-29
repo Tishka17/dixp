@@ -25,7 +25,6 @@ class RuntimeRegistry(RegistryPort):
         self._open_generic_bindings = dict(snapshot.open_generic_bindings)
         self._activations = tuple(sorted(snapshot.activations, key=lambda item: item.order))
         self._interceptors = tuple(sorted(snapshot.interceptors, key=lambda item: item.order))
-        self._policy_names = tuple(snapshot.policy_names)
         self._autowire_policy = snapshot.autowire_policy
         self._autowire_registrations: dict[ServiceKey, Registration] = {}
         self._autowire_failures: dict[ServiceKey, ResolutionError] = {}
@@ -269,7 +268,6 @@ class RuntimeRegistry(RegistryPort):
             cache=registration.cache,
             activation_hooks=registration.activation_hooks + (getattr(binding.hook, "__name__", type(binding.hook).__name__),),
             interceptors=registration.interceptors,
-            policies=registration.policies or self._policy_names,
         )
 
     def _apply_interceptors(self, registration: Registration) -> Registration:
@@ -278,23 +276,7 @@ class RuntimeRegistry(RegistryPort):
             key=lambda item: item.order,
         )
         if not bindings:
-            if registration.policies:
-                return registration
-            return Registration(
-                service_key=registration.service_key,
-                graph_key=registration.graph_key,
-                lifetime=registration.lifetime,
-                provider=registration.provider,
-                aprovider=registration.aprovider,
-                dependencies=registration.dependencies,
-                description=registration.description,
-                display=registration.display,
-                cache_token=registration.cache_token,
-                cache=registration.cache,
-                activation_hooks=registration.activation_hooks,
-                interceptors=registration.interceptors,
-                policies=self._policy_names,
-            )
+            return registration
 
         provider = registration.provider
         aprovider = registration.aprovider
@@ -353,5 +335,4 @@ class RuntimeRegistry(RegistryPort):
             interceptors=registration.interceptors + tuple(
                 getattr(binding.interceptor, "__name__", type(binding.interceptor).__name__) for binding in bindings
             ),
-            policies=registration.policies or self._policy_names,
         )

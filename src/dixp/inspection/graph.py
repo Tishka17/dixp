@@ -1,10 +1,43 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from ..core.errors import ResolutionError, ValidationError
 from ..core.graph import Registration, collection_spec, describe_key, request_wrapper_spec
-from ..core.models import Lifetime, ServiceKey
+from ..core.models import RegistrationInfo, Lifetime, ServiceKey
 from ..core.ports import InspectorPort, RegistryPort
 from ..core.resolution import ResolutionContext, format_path
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorReport:
+    ok: bool
+    roots: tuple[ServiceKey, ...]
+    registrations: tuple[RegistrationInfo, ...]
+    errors: tuple[str, ...]
+    notes: tuple[str, ...]
+
+    def format(self) -> str:
+        lines = [
+            "dixp doctor",
+            f"status: {'ok' if self.ok else 'failed'}",
+            f"services: {len(self.registrations)}",
+        ]
+        if self.roots:
+            lines.append("roots: " + ", ".join(describe_key(key) for key in self.roots))
+        if self.notes:
+            lines.append("notes:")
+            lines.extend(f"- {note}" for note in self.notes)
+        if self.errors:
+            lines.append("errors:")
+            lines.extend(f"- {error}" for error in self.errors)
+        return "\n".join(lines)
+
+    def __str__(self) -> str:
+        return self.format()
+
+    def __bool__(self) -> bool:
+        return self.ok
 
 
 class GraphInspector(InspectorPort):
@@ -116,8 +149,6 @@ class GraphInspector(InspectorPort):
 
         def walk_registration(registration: Registration, prefix: str, path: tuple[ServiceKey, ...]) -> None:
             line(prefix, f"{registration.display} [{registration.lifetime.value}]")
-            if registration.policies:
-                line(prefix + "  ", f"policies: {', '.join(registration.policies)}")
             if registration.activation_hooks:
                 line(prefix + "  ", f"activations: {', '.join(registration.activation_hooks)}")
             if registration.interceptors:
@@ -136,3 +167,41 @@ class GraphInspector(InspectorPort):
 
         walk(key, "", ())
         return "\n".join(lines)
+
+    def doctor(self, *roots: ServiceKey) -> DoctorReport:
+        registrations = self._registry.catalog(include_dynamic=False)
+        notes: list[str] = []
+        errors: tuple[str, ...] = ()
+
+        singles = sum(1 for item in registrations if item.kind == "single")
+        multis = sum(1 for item in registrations if item.kind == "multi")
+        generics = sum(1 for item in registrations if item.kind == "open_generic")
+
+        if registrations:
+            notes.append(f"{singles} single, {multis} multi, {generics} generic registrations")
+        else:
+            notes.append("no explicit registrations yet; runtime resolution will rely on autowiring only")
+
+        try:
+            self.validate(*roots)
+            notes.append("graph validation passed")
+            ok = True
+        except ValidationError as exc:
+            ok = False
+            payload = str(exc)
+            if payload.startswith("Dependency graph validation failed:\n"):
+                payload = payload.removeprefix("Dependency graph validation failed:\n")
+            errors = tuple(line.removeprefix("- ").strip() for line in payload.splitlines() if line.strip())
+
+        if roots:
+            notes.append("focused validation on selected roots")
+        elif registrations:
+            notes.append("validated all registered roots")
+
+        return DoctorReport(
+            ok=ok,
+            roots=tuple(dict.fromkeys(roots)),
+            registrations=registrations,
+            errors=errors,
+            notes=tuple(notes),
+        )
