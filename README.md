@@ -365,3 +365,24 @@ The root package is intentionally small.
 
 If you need lower-level composition primitives, open generics, or policy internals,
 they still live in the package internals, but they are not the recommended entry point.
+
+## Benchmarks
+
+Benchmark artifacts live in the repository:
+
+- [Benchmark Summary](BENCHMARK_SUMMARY.md)
+- [Latest Benchmark Report](benchmarks/latest-results.md)
+- [Competitive Comparison](COMPETITIVE_COMPARISON.md)
+- [Benchmark Workflow Notes](benchmarks/README.md)
+- [Benchmark Harness](benchmarks/run_di_benchmarks.py)
+
+Typical workflow:
+
+```bash
+PYTHONPATH=src .venv/bin/python benchmarks/run_di_benchmarks.py --repeat 5 --iterations 50 --format json > benchmarks/latest-results.json
+python3 benchmarks/render_results_md.py benchmarks/latest-results.json > benchmarks/latest-results.md
+```
+
+`BENCHMARK_SUMMARY.md` is the short operational take.
+`benchmarks/latest-results.md` is the rendered raw snapshot.
+`COMPETITIVE_COMPARISON.md` is the longer interpretation.

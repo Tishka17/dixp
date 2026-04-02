@@ -1,0 +1,558 @@
+{
+  "results": [
+    {
+      "available": true,
+      "library": "dixp",
+      "metrics": [
+        {
+          "best": 0.0325694600190036,
+          "iterations": 50,
+          "mean": 0.033161233832128344,
+          "median": 0.03307756808120757,
+          "name": "freeze",
+          "repeat": 5,
+          "stdev": 0.0005192306573067318,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 0.03267973102163523,
+          "iterations": 50,
+          "mean": 0.03318387917196378,
+          "median": 0.032943408880382774,
+          "name": "start",
+          "repeat": 5,
+          "stdev": 0.0005536388149369603,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 3.987726056948304e-05,
+          "iterations": 50,
+          "mean": 4.038637550547719e-05,
+          "median": 4.042835906147957e-05,
+          "name": "validate",
+          "repeat": 5,
+          "stdev": 3.817273820067448e-07,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 3.5139143001288178e-06,
+          "iterations": 10000,
+          "mean": 3.594048281665892e-06,
+          "median": 3.6031167022883894e-06,
+          "name": "singleton_get",
+          "repeat": 5,
+          "stdev": 4.969568609756901e-08,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 1.8912138999439777e-05,
+          "iterations": 5000,
+          "mean": 1.9107338325120508e-05,
+          "median": 1.9016371411271393e-05,
+          "name": "scoped_get",
+          "repeat": 5,
+          "stdev": 2.1788559479138437e-07,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 1.3847394613549114e-05,
+          "iterations": 5000,
+          "mean": 1.446637928020209e-05,
+          "median": 1.4136254996992648e-05,
+          "name": "collection_all",
+          "repeat": 5,
+          "stdev": 9.410984540050285e-07,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 4.295342720579356e-05,
+          "iterations": 5000,
+          "mean": 4.331009299959987e-05,
+          "median": 4.3164271395653484e-05,
+          "name": "call",
+          "repeat": 5,
+          "stdev": 4.862856280395776e-07,
+          "unit": "seconds/op"
+        }
+      ],
+      "package": "dixp",
+      "skip_reason": null,
+      "supported": true
+    },
+    {
+      "available": true,
+      "library": "dependency-injector",
+      "metrics": [
+        {
+          "best": 5.4054558277130126e-05,
+          "iterations": 50,
+          "mean": 7.71256722509861e-05,
+          "median": 5.526648135855794e-05,
+          "name": "freeze",
+          "repeat": 5,
+          "stdev": 4.60866460444674e-05,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 0.00019480046117678284,
+          "iterations": 50,
+          "mean": 0.00019764465978369116,
+          "median": 0.00019683585967868566,
+          "name": "start",
+          "repeat": 5,
+          "stdev": 2.294427635271343e-06,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 2.1537519060075284e-05,
+          "iterations": 50,
+          "mean": 2.233402756974101e-05,
+          "median": 2.2131239529699086e-05,
+          "name": "validate",
+          "repeat": 5,
+          "stdev": 7.778996335387849e-07,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 5.833610193803906e-08,
+          "iterations": 10000,
+          "mean": 6.116335978731513e-08,
+          "median": 6.10065064392984e-08,
+          "name": "singleton_get",
+          "repeat": 5,
+          "stdev": 2.167968697607605e-09,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 5.132029997184872e-07,
+          "iterations": 5000,
+          "mean": 5.169694405049085e-07,
+          "median": 5.164324073120952e-07,
+          "name": "scoped_get",
+          "repeat": 5,
+          "stdev": 3.6288996645255604e-09,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 9.188677882775664e-07,
+          "iterations": 5000,
+          "mean": 9.298074385151267e-07,
+          "median": 9.237890131771564e-07,
+          "name": "collection_all",
+          "repeat": 5,
+          "stdev": 1.8178783467277515e-08,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 2.986260806210339e-06,
+          "iterations": 5000,
+          "mean": 3.003538609482348e-06,
+          "median": 2.995970007032156e-06,
+          "name": "call",
+          "repeat": 5,
+          "stdev": 1.810886992905653e-08,
+          "unit": "seconds/op"
+        }
+      ],
+      "package": "dependency_injector",
+      "skip_reason": null,
+      "supported": true
+    },
+    {
+      "available": true,
+      "library": "injector",
+      "metrics": [
+        {
+          "best": 0.00012011841870844364,
+          "iterations": 50,
+          "mean": 0.00012953745108097793,
+          "median": 0.00012169522000476718,
+          "name": "freeze",
+          "repeat": 5,
+          "stdev": 1.852930308708117e-05,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 0.00019877534126862883,
+          "iterations": 50,
+          "mean": 0.0002050598277710378,
+          "median": 0.00020501971943303942,
+          "name": "start",
+          "repeat": 5,
+          "stdev": 5.485796023432211e-06,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 5.3388699889183045e-05,
+          "iterations": 50,
+          "mean": 5.4416608065366744e-05,
+          "median": 5.373134044930339e-05,
+          "name": "validate",
+          "repeat": 5,
+          "stdev": 1.2185787169036564e-06,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 1.3137680012732745e-06,
+          "iterations": 10000,
+          "mean": 1.3411036622710526e-06,
+          "median": 1.3461333932355046e-06,
+          "name": "singleton_get",
+          "repeat": 5,
+          "stdev": 1.690891996309089e-08,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 2.4514007405377926e-05,
+          "iterations": 5000,
+          "mean": 2.4716953476890922e-05,
+          "median": 2.4808355187997223e-05,
+          "name": "scoped_get",
+          "repeat": 5,
+          "stdev": 1.714522875685174e-07,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 2.665368397720158e-06,
+          "iterations": 5000,
+          "mean": 2.7047982858493927e-06,
+          "median": 2.7027188101783396e-06,
+          "name": "collection_all",
+          "repeat": 5,
+          "stdev": 2.563368849712598e-08,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 0.00011049271000083536,
+          "iterations": 5000,
+          "mean": 0.00011193128447979689,
+          "median": 0.00011161331520415843,
+          "name": "call",
+          "repeat": 5,
+          "stdev": 1.1118789249895972e-06,
+          "unit": "seconds/op"
+        }
+      ],
+      "package": "injector",
+      "skip_reason": null,
+      "supported": true
+    },
+    {
+      "available": true,
+      "library": "lagom",
+      "metrics": [
+        {
+          "best": 6.450014188885689e-07,
+          "iterations": 50,
+          "mean": 6.711161695420742e-07,
+          "median": 6.481190212070942e-07,
+          "name": "freeze",
+          "repeat": 5,
+          "stdev": 4.779655795414531e-08,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 2.0543320570141077e-05,
+          "iterations": 50,
+          "mean": 3.4295900259166954e-05,
+          "median": 2.226936165243387e-05,
+          "name": "start",
+          "repeat": 5,
+          "stdev": 2.6710396298753183e-05,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 1.5853997319936752e-06,
+          "iterations": 50,
+          "mean": 1.6621560789644718e-06,
+          "median": 1.624319702386856e-06,
+          "name": "validate",
+          "repeat": 5,
+          "stdev": 1.1646778609262599e-07,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 1.07391900382936e-07,
+          "iterations": 10000,
+          "mean": 1.1644257931038736e-07,
+          "median": 1.1620159493759274e-07,
+          "name": "singleton_get",
+          "repeat": 5,
+          "stdev": 6.77303642148283e-09,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 4.2886058799922465e-07,
+          "iterations": 5000,
+          "mean": 4.392551956698298e-07,
+          "median": 4.3673079926520586e-07,
+          "name": "scoped_get",
+          "repeat": 5,
+          "stdev": 1.0020335676697732e-08,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 4.791083978489041e-07,
+          "iterations": 5000,
+          "mean": 4.812620021402837e-07,
+          "median": 4.805412143468857e-07,
+          "name": "collection_all",
+          "repeat": 5,
+          "stdev": 2.0153938667007857e-09,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 5.241534099914134e-05,
+          "iterations": 5000,
+          "mean": 5.301313864067196e-05,
+          "median": 5.298674900550395e-05,
+          "name": "call",
+          "repeat": 5,
+          "stdev": 4.672588364536312e-07,
+          "unit": "seconds/op"
+        }
+      ],
+      "package": "lagom",
+      "skip_reason": null,
+      "supported": true
+    },
+    {
+      "available": true,
+      "library": "punq",
+      "metrics": [
+        {
+          "best": 1.3737939298152923e-07,
+          "iterations": 50,
+          "mean": 1.4928774908185006e-07,
+          "median": 1.3985903933644296e-07,
+          "name": "freeze",
+          "repeat": 5,
+          "stdev": 1.8642984051307322e-08,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 3.3468720503151416e-05,
+          "iterations": 50,
+          "mean": 8.847517613321543e-05,
+          "median": 3.541908226907253e-05,
+          "name": "start",
+          "repeat": 5,
+          "stdev": 7.96324745833087e-05,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 0.00015711705898866058,
+          "iterations": 50,
+          "mean": 0.00016757510043680668,
+          "median": 0.00016556008020415902,
+          "name": "validate",
+          "repeat": 5,
+          "stdev": 1.1537649843176801e-05,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 5.053275963291526e-07,
+          "iterations": 10000,
+          "mean": 6.507631763815879e-07,
+          "median": 7.115686894394457e-07,
+          "name": "singleton_get",
+          "repeat": 5,
+          "stdev": 1.1589180918146187e-07,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 1.3037029397673905e-05,
+          "iterations": 5000,
+          "mean": 1.3276052270084619e-05,
+          "median": 1.3157280581071973e-05,
+          "name": "scoped_get",
+          "repeat": 5,
+          "stdev": 2.3702359969084435e-07,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 9.473802160937339e-05,
+          "iterations": 5000,
+          "mean": 9.683835627976805e-05,
+          "median": 9.579120280686766e-05,
+          "name": "collection_all",
+          "repeat": 5,
+          "stdev": 2.334342455229337e-06,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 0.00015896795319858938,
+          "iterations": 5000,
+          "mean": 0.0001601679643569514,
+          "median": 0.00015976697180885823,
+          "name": "call",
+          "repeat": 5,
+          "stdev": 1.2715056554900464e-06,
+          "unit": "seconds/op"
+        }
+      ],
+      "package": "punq",
+      "skip_reason": null,
+      "supported": true
+    },
+    {
+      "available": true,
+      "library": "dishka",
+      "metrics": [
+        {
+          "best": 0.00023001343943178653,
+          "iterations": 50,
+          "mean": 0.0002904807319864631,
+          "median": 0.00023296929895877839,
+          "name": "freeze",
+          "repeat": 5,
+          "stdev": 0.00013034104383277873,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 0.00011351524153724313,
+          "iterations": 50,
+          "mean": 0.0001192372809164226,
+          "median": 0.00011861358070746064,
+          "name": "start",
+          "repeat": 5,
+          "stdev": 5.8610170291167645e-06,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 1.2898021377623082e-05,
+          "iterations": 50,
+          "mean": 1.4001736417412758e-05,
+          "median": 1.3637160882353783e-05,
+          "name": "validate",
+          "repeat": 5,
+          "stdev": 1.3308252507390205e-06,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 2.740158000960946e-07,
+          "iterations": 10000,
+          "mean": 3.004712006077171e-07,
+          "median": 3.0279619386419653e-07,
+          "name": "singleton_get",
+          "repeat": 5,
+          "stdev": 1.5663110796444035e-08,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 1.974682998843491e-06,
+          "iterations": 5000,
+          "mean": 2.001681318506598e-06,
+          "median": 2.0003728102892636e-06,
+          "name": "scoped_get",
+          "repeat": 5,
+          "stdev": 2.3125388604603348e-08,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 3.023162018507719e-07,
+          "iterations": 5000,
+          "mean": 3.1031696125864985e-07,
+          "median": 3.1088979449123146e-07,
+          "name": "collection_all",
+          "repeat": 5,
+          "stdev": 5.887462962530341e-09,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 3.0155034037306904e-06,
+          "iterations": 5000,
+          "mean": 3.0622202437371016e-06,
+          "median": 3.0591782182455064e-06,
+          "name": "call",
+          "repeat": 5,
+          "stdev": 5.0393707487247064e-08,
+          "unit": "seconds/op"
+        }
+      ],
+      "package": "dishka",
+      "skip_reason": null,
+      "supported": true
+    },
+    {
+      "available": true,
+      "library": "wireup",
+      "metrics": [
+        {
+          "best": 6.906539900228381e-05,
+          "iterations": 50,
+          "mean": 0.00012679984839633108,
+          "median": 7.638184120878577e-05,
+          "name": "freeze",
+          "repeat": 5,
+          "stdev": 8.078818766062115e-05,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 0.0013012982392683625,
+          "iterations": 50,
+          "mean": 0.0013142431359738113,
+          "median": 0.0013175076781772076,
+          "name": "start",
+          "repeat": 5,
+          "stdev": 1.0063814614036128e-05,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 2.8933002613484858e-06,
+          "iterations": 50,
+          "mean": 3.000608179718256e-06,
+          "median": 2.908518072217703e-06,
+          "name": "validate",
+          "repeat": 5,
+          "stdev": 1.9662191293400748e-07,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 7.918119663372636e-08,
+          "iterations": 10000,
+          "mean": 8.398777805268765e-08,
+          "median": 8.467698935419322e-08,
+          "name": "singleton_get",
+          "repeat": 5,
+          "stdev": 3.2485742480408453e-09,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 1.954303588718176e-06,
+          "iterations": 5000,
+          "mean": 2.035942352376878e-06,
+          "median": 2.0480616018176077e-06,
+          "name": "scoped_get",
+          "repeat": 5,
+          "stdev": 5.2381186526279865e-08,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 8.65912064909935e-08,
+          "iterations": 5000,
+          "mean": 9.056739043444396e-08,
+          "median": 9.015118703246116e-08,
+          "name": "collection_all",
+          "repeat": 5,
+          "stdev": 2.978777266537437e-09,
+          "unit": "seconds/op"
+        },
+        {
+          "best": 2.585930610075593e-06,
+          "iterations": 5000,
+          "mean": 2.665311647579074e-06,
+          "median": 2.6617082068696616e-06,
+          "name": "call",
+          "repeat": 5,
+          "stdev": 6.729844035990253e-08,
+          "unit": "seconds/op"
+        }
+      ],
+      "package": "wireup",
+      "skip_reason": null,
+      "supported": true
+    }
+  ],
+  "root": "/home/tishka17/src/dixp"
+}
