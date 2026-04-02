@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable, Protocol
 
 from .graph import CallPlan, Registration
-from .models import RegistrationInfo, ServiceKey
+from .models import BundleContract, RegistrationInfo, ServiceKey
 
 
 class CachePort(Protocol):
@@ -23,6 +23,8 @@ class RegistryPort(Protocol):
 
     def catalog(self, *, include_dynamic: bool = False) -> tuple[RegistrationInfo, ...]: ...
 
+    def compose_registration(self, registration: Registration) -> Registration: ...
+
     def registration_for(self, key: ServiceKey, *, suppress_autowire_errors: bool) -> Registration | None: ...
 
     def registrations_for_collection(
@@ -33,6 +35,8 @@ class RegistryPort(Protocol):
     ) -> tuple[Registration, ...]: ...
 
     def invocation_plan(self, target: Callable[..., Any]) -> CallPlan: ...
+
+    def bundle_contract(self, name: str) -> BundleContract | None: ...
 
 
 class InspectorPort(Protocol):

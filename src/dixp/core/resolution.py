@@ -29,12 +29,10 @@ class ResolutionContext:
         for frame in self.frames:
             if frame.key == key:
                 path = format_path(self.frames, tail=display or key)
-                raise CircularDependencyError(f"Circular dependency detected: {path}")
+                raise CircularDependencyError(details={"path": path})
         if lifetime is Lifetime.SCOPED and any(frame.lifetime is Lifetime.SINGLETON for frame in self.frames):
             path = format_path(self.frames, tail=display or key)
-            raise LifetimeMismatchError(
-                f"Scoped dependency {display or describe_key(key)} cannot be captured by a singleton: {path}"
-            )
+            raise LifetimeMismatchError(details={"key": display or describe_key(key), "path": path})
         return ResolutionContext(
             self.frames
             + (

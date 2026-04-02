@@ -1,14 +1,26 @@
 """Public API for dixp."""
 
 from .api import App, Blueprint, SafeMode, StrictMode, bundle, named, scoped, service, singleton, transient
-from .inspection import DoctorReport
-from .runtime import Container, Scope
+from .config import from_env
+from .inspection import BundleCycle, BundleGraphDiff, DoctorReport
+from .runtime import Container, Scope, current_resolver
 from .testing import TestApp, stub
 from .core.errors import (
+    AmbientResolverError,
+    AsyncApiUsageError,
+    AutowireError,
+    BundleContractValidationError,
     CircularDependencyError,
     ContainerError,
     ContainerClosedError,
+    GraphValidationError,
+    InvalidOverrideError,
+    InvocationPreparationError,
+    InvocationSignatureError,
     LifetimeMismatchError,
+    MissingRegistrationError,
+    MissingRegistrationValidationError,
+    OpenGenericResolutionError,
     RegistrationError,
     ResolutionError,
     ValidationError,
@@ -23,17 +35,30 @@ from .core.models import (
 
 __all__ = [
     "App",
+    "AmbientResolverError",
+    "AsyncApiUsageError",
+    "AutowireError",
     "Blueprint",
+    "BundleContractValidationError",
     "CircularDependencyError",
     "Container",
     "ContainerError",
     "ContainerClosedError",
+    "BundleCycle",
     "DoctorReport",
+    "BundleGraphDiff",
     "Factory",
+    "GraphValidationError",
     "Inject",
+    "InvalidOverrideError",
+    "InvocationPreparationError",
+    "InvocationSignatureError",
     "Lazy",
     "Lifetime",
     "LifetimeMismatchError",
+    "MissingRegistrationError",
+    "MissingRegistrationValidationError",
+    "OpenGenericResolutionError",
     "Provider",
     "RegistrationError",
     "ResolutionError",
@@ -43,6 +68,8 @@ __all__ = [
     "TestApp",
     "ValidationError",
     "bundle",
+    "current_resolver",
+    "from_env",
     "named",
     "scoped",
     "service",

@@ -108,6 +108,24 @@ class RegistrationInfo:
     kind: str
     lifetime: Lifetime
     description: str
+    bundle: str | None = None
+    source: str | None = None
+    source_location: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BundleContract:
+    exports: tuple[ServiceKey, ...] | None = None
+    requires: tuple[ServiceKey, ...] | None = None
+    private: tuple[ServiceKey, ...] = ()
+    layer: str | None = None
+    tags: tuple[str, ...] = ()
+    forbid_outgoing_to: tuple[str, ...] = ()
+    allow_incoming_from: tuple[str, ...] | None = None
+    forbid_outgoing_to_layers: tuple[str, ...] = ()
+    allow_incoming_from_layers: tuple[str, ...] | None = None
+    forbid_outgoing_to_tags: tuple[str, ...] = ()
+    allow_incoming_from_tags: tuple[str, ...] | None = None
 
 
 class Interceptor(Protocol):

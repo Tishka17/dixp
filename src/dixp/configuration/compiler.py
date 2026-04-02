@@ -9,15 +9,18 @@ from ..core.graph import (
     MISSING,
     OpenGenericBinding,
     Registration,
+    compose_registration,
     compile_call_plan,
     dependency_from_annotation,
     describe_key,
-    maybe_await,
+    describe_source,
+    describe_source_location,
 )
 from ..core.metadata import ComponentSpec
 from ..core.models import (
     ActivationBinding,
     AutowirePolicy,
+    BundleContract,
     BuildProfile,
     DuplicatePolicy,
     InterceptorBinding,
@@ -47,36 +50,41 @@ class GraphCompiler:
         self._registrations: dict[ServiceKey, Registration] = {}
         self._multi_registrations: dict[ServiceKey, list[Registration]] = {}
         self._open_generic_bindings: dict[ServiceKey, OpenGenericBinding] = {}
+        self._bundle_contracts: dict[str, BundleContract] = {}
         self._profile = profile
         self._duplicate_policy = duplicate_policy or DuplicatePolicy.ERROR
         self._autowire_policy = autowire_policy or self._default_autowire_policy(profile)
         self._multibind_counter = 0
+        self._collection_counter = 0
+        self._bundle_counter = 0
         self._activations: list[ActivationBinding] = []
         self._interceptors: list[InterceptorBinding] = []
 
     def compile(self, entries: tuple[Any, ...]) -> RegistrySnapshot:
         for entry in entries:
-            self._apply_entry(entry)
+            self._apply_entry(entry, owner=None)
         snapshot = RegistrySnapshot(
             registrations=dict(self._registrations),
             multi_registrations={key: tuple(registrations) for key, registrations in self._multi_registrations.items()},
             open_generic_bindings=dict(self._open_generic_bindings),
+            bundle_contracts=dict(self._bundle_contracts),
             activations=tuple(self._activations),
             interceptors=tuple(self._interceptors),
             autowire_policy=self._autowire_policy,
         )
         return snapshot
 
-    def _apply_entry(self, entry: Any) -> None:
+    def _apply_entry(self, entry: Any, *, owner: str | None) -> None:
         if isinstance(entry, ModuleSpec):
+            module_owner = self._resolve_module_owner(entry, owner=owner)
             for child in entry.entries:
-                self._apply_entry(child)
+                self._apply_entry(child, owner=module_owner)
             return
         if isinstance(entry, BindingSpec):
-            self._apply_binding(entry)
+            self._apply_binding(entry, owner=owner)
             return
         if isinstance(entry, AliasSpec):
-            self._apply_alias(entry)
+            self._apply_alias(entry, owner=owner)
             return
         if isinstance(entry, ActivationSpec):
             self._apply_activation(entry)
@@ -86,21 +94,75 @@ class GraphCompiler:
             return
         spec = getattr(entry, "__dixp_component__", None)
         if isinstance(spec, ComponentSpec):
-            self._apply_component(entry, spec)
+            self._apply_component(entry, spec, owner=owner)
             return
 
-        raise RegistrationError(f"Unsupported composition entry: {entry!r}")
+        raise RegistrationError(code="unsupported_composition_entry", details={"entry": repr(entry)})
 
-    def _apply_component(self, entry: Any, spec: ComponentSpec) -> None:
+    def _resolve_module_owner(self, spec: ModuleSpec, *, owner: str | None) -> str | None:
+        has_contract = spec.has_contract()
+        if spec.name is None and not has_contract:
+            return owner
+
+        bundle = spec.name
+        if bundle is None:
+            self._bundle_counter += 1
+            bundle = f"bundle#{self._bundle_counter}"
+
+        contract = BundleContract(
+            exports=spec.exported_keys,
+            requires=spec.required_keys,
+            private=tuple(dict.fromkeys(spec.private_keys)),
+            layer=spec.layer_name,
+            tags=tuple(dict.fromkeys(spec.tags)),
+            forbid_outgoing_to=tuple(dict.fromkeys(spec.forbidden_outgoing_bundles)),
+            allow_incoming_from=spec.allowed_incoming_bundles,
+            forbid_outgoing_to_layers=tuple(dict.fromkeys(spec.forbidden_outgoing_layers)),
+            allow_incoming_from_layers=spec.allowed_incoming_layers,
+            forbid_outgoing_to_tags=tuple(dict.fromkeys(spec.forbidden_outgoing_tags)),
+            allow_incoming_from_tags=spec.allowed_incoming_tags,
+        )
+        previous = self._bundle_contracts.get(bundle)
+        if previous is None:
+            self._bundle_contracts[bundle] = contract
+        elif previous != contract:
+            raise RegistrationError(code="conflicting_bundle_contract", details={"bundle": repr(bundle)})
+        return bundle
+
+    def _apply_component(self, entry: Any, spec: ComponentSpec, *, owner: str | None) -> None:
         key = spec.key or entry
         if inspect.isclass(entry):
-            self._add_registration(key, entry, None, MISSING, spec.lifetime, replace=None, multiple=spec.multiple)
+            self._add_registration(
+                key,
+                entry,
+                None,
+                MISSING,
+                spec.lifetime,
+                replace=None,
+                multiple=spec.multiple,
+                owner=owner,
+            )
             return
-        self._add_registration(key, None, entry, MISSING, spec.lifetime, replace=None, multiple=spec.multiple)
+        self._add_registration(
+            key,
+            None,
+            entry,
+            MISSING,
+            spec.lifetime,
+            replace=None,
+            multiple=spec.multiple,
+            owner=owner,
+        )
 
-    def _apply_binding(self, spec: BindingSpec) -> None:
+    def _apply_binding(self, spec: BindingSpec, *, owner: str | None) -> None:
         if spec.open_generic:
-            self._open_generic(spec.key, spec.implementation, lifetime=spec.lifetime, replace=spec.replace)
+            self._open_generic(
+                spec.key,
+                spec.implementation,
+                lifetime=spec.lifetime,
+                replace=spec.replace,
+                owner=owner,
+            )
             return
         self._add_registration(
             spec.key,
@@ -110,9 +172,10 @@ class GraphCompiler:
             spec.lifetime,
             replace=spec.replace,
             multiple=spec.multiple,
+            owner=owner,
         )
 
-    def _apply_alias(self, spec: AliasSpec) -> None:
+    def _apply_alias(self, spec: AliasSpec, *, owner: str | None) -> None:
         self._validate_service_key(spec.key)
         self._validate_service_key(spec.target)
         base_registration = Registration(
@@ -124,6 +187,9 @@ class GraphCompiler:
             dependencies=(DependencySpec(key=spec.target, has_default=False),),
             description=f"alias {describe_key(spec.key)} -> {describe_key(spec.target)}",
             display=describe_key(spec.key),
+            collection_order=self._next_collection_order(),
+            bundle=owner,
+            source=f"alias to {describe_key(spec.target)}",
             cache=False,
         )
         registration = self._validate_registration(self._compose_registration(base_registration))
@@ -164,6 +230,7 @@ class GraphCompiler:
         *,
         replace: bool | None,
         multiple: bool,
+        owner: str | None,
     ) -> None:
         key = self._normalize_key(key, implementation=implementation, factory=factory, instance=instance)
         self._validate_service_key(key)
@@ -174,6 +241,8 @@ class GraphCompiler:
             instance=instance,
             lifetime=lifetime,
             graph_suffix=f"[{self._multibind_counter}]" if multiple else "",
+            collection_order=self._next_collection_order(),
+            owner=owner,
         )
         registration = self._validate_registration(self._compose_registration(base_registration))
         if multiple:
@@ -198,20 +267,14 @@ class GraphCompiler:
         if factory is not None:
             hints = get_type_hints(factory, include_extras=True)
             if "return" not in hints:
-                raise RegistrationError(
-                    "Factory registration without a key needs a return type hint. "
-                    "Add `-> ServiceType` to the factory or bind it explicitly with `app.bind(ServiceType).factory(...)`."
-                )
+                raise RegistrationError(code="missing_factory_return_type")
             dependency = dependency_from_annotation(hints["return"])
             if dependency is None:
-                raise RegistrationError(
-                    "Factory return annotation is not a valid service key. "
-                    "Use a concrete type, protocol, or named key."
-                )
+                raise RegistrationError(code="invalid_factory_return_key")
             return dependency
         if instance is not MISSING:
             return type(instance)
-        raise RegistrationError("Registration requires a service key or an inferable target")
+        raise RegistrationError(code="missing_service_key_or_target")
 
     def _default_autowire_policy(self, profile: BuildProfile) -> AutowirePolicy:
         if profile is BuildProfile.STRICT:
@@ -222,10 +285,7 @@ class GraphCompiler:
 
     def _validate_service_key(self, key: ServiceKey) -> None:
         if self._profile is BuildProfile.ENTERPRISE and isinstance(key, str):
-            raise RegistrationError(
-                "Safe mode requires typed service keys. "
-                "Use a class/protocol key, `named(Type, 'name')`, or a dedicated token object."
-            )
+            raise RegistrationError(code="typed_service_key_required", details={"key": key})
 
     def _store_registration(
         self,
@@ -237,9 +297,13 @@ class GraphCompiler:
     ) -> None:
         should_replace = self._duplicate_policy is DuplicatePolicy.REPLACE if replace is None else replace
         if not should_replace and key in self._base_registrations:
-            raise RegistrationError(f"Duplicate registration for {describe_key(key)}")
+            raise RegistrationError(code="duplicate_registration", details={"key": describe_key(key)})
         self._base_registrations[key] = base_registration
         self._registrations[key] = registration
+
+    def _next_collection_order(self) -> int:
+        self._collection_counter += 1
+        return self._collection_counter
 
     def _validate_registration(self, registration: Registration) -> Registration:
         return Registration(
@@ -251,6 +315,10 @@ class GraphCompiler:
             dependencies=registration.dependencies,
             description=registration.description,
             display=registration.display,
+            collection_order=registration.collection_order,
+            bundle=registration.bundle,
+            source=registration.source,
+            source_location=registration.source_location,
             cache_token=registration.cache_token,
             cache=registration.cache,
             activation_hooks=registration.activation_hooks,
@@ -268,135 +336,7 @@ class GraphCompiler:
         }
 
     def _compose_registration(self, registration: Registration) -> Registration:
-        registration = self._apply_activations(registration)
-        return self._apply_interceptors(registration)
-
-    def _apply_interceptors(self, registration: Registration) -> Registration:
-        wrapped = registration
-        for binding in sorted(self._interceptors, key=lambda item: item.order):
-            wrapped = self._apply_interceptor_binding(wrapped, binding)
-        return wrapped
-
-    def _apply_activations(self, registration: Registration) -> Registration:
-        wrapped = registration
-        for binding in sorted(self._activations, key=lambda item: item.order):
-            wrapped = self._apply_activation_binding(wrapped, binding)
-        return wrapped
-
-    def _apply_activation_binding(self, registration: Registration, binding: ActivationBinding) -> Registration:
-        if not binding.predicate(registration.service_key, registration.lifetime):
-            return registration
-
-        provider = registration.provider
-        aprovider = registration.aprovider
-
-        def wrap_sync(
-            current: Callable[..., Any],
-            hook: Callable[..., Any],
-            *,
-            key: ServiceKey,
-            lifetime: Lifetime,
-        ) -> Callable[..., Any]:
-            def invoke(resolver: Any, context: Any) -> Any:
-                instance = current(resolver, context)
-                result = hook(instance, key=key, lifetime=lifetime)
-                return instance if result is None else result
-
-            return invoke
-
-        def wrap_async(
-            current: Callable[..., Any],
-            hook: Callable[..., Any],
-            ahook: Callable[..., Any] | None,
-            *,
-            key: ServiceKey,
-            lifetime: Lifetime,
-        ) -> Callable[..., Any]:
-            async def invoke(resolver: Any, context: Any) -> Any:
-                instance = await maybe_await(current(resolver, context))
-                target_hook = ahook or hook
-                result = await maybe_await(target_hook(instance, key=key, lifetime=lifetime))
-                return instance if result is None else result
-
-            return invoke
-
-        return Registration(
-            service_key=registration.service_key,
-            graph_key=registration.graph_key,
-            lifetime=registration.lifetime,
-            provider=wrap_sync(provider, binding.hook, key=registration.service_key, lifetime=registration.lifetime),
-            aprovider=wrap_async(
-                aprovider,
-                binding.hook,
-                binding.ahook,
-                key=registration.service_key,
-                lifetime=registration.lifetime,
-            ),
-            dependencies=registration.dependencies,
-            description=registration.description,
-            display=registration.display,
-            cache_token=registration.cache_token,
-            cache=registration.cache,
-            activation_hooks=registration.activation_hooks + (getattr(binding.hook, "__name__", type(binding.hook).__name__),),
-            interceptors=registration.interceptors,
-        )
-
-    def _apply_interceptor_binding(self, registration: Registration, binding: InterceptorBinding) -> Registration:
-        if not binding.predicate(registration.service_key, registration.lifetime):
-            return registration
-
-        provider = registration.provider
-        aprovider = registration.aprovider
-
-        def wrap_sync(
-            current: Callable[..., Any],
-            interceptor: Callable[..., Any],
-            *,
-            key: ServiceKey,
-            lifetime: Lifetime,
-        ) -> Callable[..., Any]:
-            def invoke(resolver: Any, context: Any) -> Any:
-                instance = current(resolver, context)
-                return interceptor(instance, key=key, lifetime=lifetime)
-
-            return invoke
-
-        def wrap_async(
-            current: Callable[..., Any],
-            interceptor: Callable[..., Any],
-            ainterceptor: Callable[..., Any] | None,
-            *,
-            key: ServiceKey,
-            lifetime: Lifetime,
-        ) -> Callable[..., Any]:
-            async def invoke(resolver: Any, context: Any) -> Any:
-                instance = await maybe_await(current(resolver, context))
-                if ainterceptor is not None:
-                    return await maybe_await(ainterceptor(instance, key=key, lifetime=lifetime))
-                return interceptor(instance, key=key, lifetime=lifetime)
-
-            return invoke
-
-        return Registration(
-            service_key=registration.service_key,
-            graph_key=registration.graph_key,
-            lifetime=registration.lifetime,
-            provider=wrap_sync(provider, binding.interceptor, key=registration.service_key, lifetime=registration.lifetime),
-            aprovider=wrap_async(
-                aprovider,
-                binding.interceptor,
-                binding.ainterceptor,
-                key=registration.service_key,
-                lifetime=registration.lifetime,
-            ),
-            dependencies=registration.dependencies,
-            description=registration.description,
-            display=registration.display,
-            cache_token=registration.cache_token,
-            cache=registration.cache,
-            activation_hooks=registration.activation_hooks,
-            interceptors=registration.interceptors + (getattr(binding.interceptor, "__name__", type(binding.interceptor).__name__),),
-        )
+        return compose_registration(registration, activations=self._activations, interceptors=self._interceptors)
 
     def _build_registration(
         self,
@@ -407,6 +347,8 @@ class GraphCompiler:
         instance: Any,
         lifetime: Lifetime,
         graph_suffix: str = "",
+        collection_order: int,
+        owner: str | None = None,
     ) -> Registration:
         choices = [
             implementation is not None,
@@ -414,7 +356,7 @@ class GraphCompiler:
             instance is not MISSING,
         ]
         if sum(choices) > 1:
-            raise RegistrationError("Choose only one of implementation, factory, or instance")
+            raise RegistrationError(code="multiple_binding_sources")
         if instance is not MISSING:
             return Registration(
                 service_key=key,
@@ -425,16 +367,17 @@ class GraphCompiler:
                 dependencies=(),
                 description=f"instance for {describe_key(key)}",
                 display=f"{describe_key(key)}{graph_suffix}",
+                collection_order=collection_order,
+                bundle=owner,
+                source=describe_source(instance, instance=True),
+                source_location=describe_source_location(instance, instance=True),
             )
 
         if implementation is None and factory is None:
             if isinstance(key, type):
                 implementation = key
             else:
-                raise RegistrationError(
-                    f"Registration for {describe_key(key)} needs an implementation, factory, or instance. "
-                    f"Try `app.bind({describe_key(key)}).to(...)`, `.factory(...)`, or `.instance(...)`."
-                )
+                raise RegistrationError(code="missing_binding_target", details={"key": describe_key(key)})
 
         if implementation is not None:
             self._validate_implementation(key, implementation)
@@ -454,6 +397,10 @@ class GraphCompiler:
                 dependencies=plan.dependencies,
                 description=description,
                 display=f"{describe_key(key)}{graph_suffix}",
+                collection_order=collection_order,
+                bundle=owner,
+                source=describe_source(implementation),
+                source_location=describe_source_location(implementation),
             )
 
         assert factory is not None
@@ -469,6 +416,10 @@ class GraphCompiler:
             dependencies=plan.dependencies,
             description=description,
             display=f"{describe_key(key)}{graph_suffix}",
+            collection_order=collection_order,
+            bundle=owner,
+            source=describe_source(factory),
+            source_location=describe_source_location(factory),
         )
 
     def _validate_implementation(self, key: ServiceKey, implementation: type[Any]) -> None:
@@ -477,8 +428,11 @@ class GraphCompiler:
         try:
             if not issubclass(implementation, key):
                 raise RegistrationError(
-                    f"{describe_key(implementation)} is not compatible with service {describe_key(key)}. "
-                    "Bind an implementation that matches the requested interface or change the service key."
+                    code="incompatible_implementation",
+                    details={
+                        "implementation": describe_key(implementation),
+                        "key": describe_key(key),
+                    },
                 )
         except TypeError:
             return
@@ -492,18 +446,29 @@ class GraphCompiler:
             return
         if dependency != key:
             raise RegistrationError(
-                f"Factory {describe_key(factory)} returns {describe_key(dependency)}, expected {describe_key(key)}. "
-                "Either fix the return annotation or bind the factory under the returned service key."
+                code="factory_return_mismatch",
+                details={
+                    "factory": describe_key(factory),
+                    "returned": describe_key(dependency),
+                    "key": describe_key(key),
+                },
             )
 
     def _validate_open_generic(self, service_origin: ServiceKey, implementation_origin: type[Any]) -> None:
         parameters = getattr(service_origin, "__parameters__", ())
         implementation_parameters = getattr(implementation_origin, "__parameters__", ())
         if not parameters:
-            raise RegistrationError(f"Open generic service {describe_key(service_origin)} must declare type parameters")
+            raise RegistrationError(
+                code="open_generic_missing_parameters",
+                details={"key": describe_key(service_origin)},
+            )
         if parameters != implementation_parameters:
             raise RegistrationError(
-                f"Open generic {describe_key(implementation_origin)} must declare the same type parameters as {describe_key(service_origin)}"
+                code="open_generic_parameters_mismatch",
+                details={
+                    "implementation": describe_key(implementation_origin),
+                    "key": describe_key(service_origin),
+                },
             )
 
     def _open_generic(
@@ -513,17 +478,25 @@ class GraphCompiler:
         *,
         lifetime: Lifetime,
         replace: bool | None,
+        owner: str | None,
     ) -> None:
         if service_origin is None or implementation_origin is None:
-            raise RegistrationError("Open generic binding requires key and implementation")
+            raise RegistrationError(code="open_generic_missing_parts")
         self._validate_service_key(service_origin)
         self._validate_open_generic(service_origin, implementation_origin)
         should_replace = self._duplicate_policy is DuplicatePolicy.REPLACE if replace is None else replace
         if not should_replace and service_origin in self._open_generic_bindings:
-            raise RegistrationError(f"Duplicate open generic registration for {describe_key(service_origin)}")
+            raise RegistrationError(
+                code="duplicate_open_generic_registration",
+                details={"key": describe_key(service_origin)},
+            )
         self._open_generic_bindings[service_origin] = OpenGenericBinding(
             service_origin=service_origin,
             implementation_origin=implementation_origin,
             lifetime=lifetime,
             description=f"open generic {describe_key(implementation_origin)} for {describe_key(service_origin)}",
+            collection_order=self._next_collection_order(),
+            bundle=owner,
+            source=describe_source(implementation_origin),
+            source_location=describe_source_location(implementation_origin),
         )

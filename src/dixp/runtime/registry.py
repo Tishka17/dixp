@@ -2,17 +2,19 @@ from __future__ import annotations
 
 from typing import Any, Callable, get_args, get_origin
 
-from ..core.errors import ResolutionError
+from ..core.errors import AutowireError, OpenGenericResolutionError, ResolutionError
 from ..core.graph import (
     CallPlan,
     OpenGenericBinding,
     Registration,
+    compose_registration,
     compile_call_plan,
     describe_key,
-    maybe_await,
+    describe_source,
+    describe_source_location,
     type_var_map,
 )
-from ..core.models import ActivationBinding, InterceptorBinding, Lifetime, RegistrationInfo, ServiceKey
+from ..core.models import BundleContract, Lifetime, RegistrationInfo, ServiceKey
 from ..core.ports import RegistryPort
 from ..configuration.registry import RegistrySnapshot
 from .context import injectable_spec, is_autowirable
@@ -23,6 +25,7 @@ class RuntimeRegistry(RegistryPort):
         self._registrations = dict(snapshot.registrations)
         self._multi_registrations = dict(snapshot.multi_registrations)
         self._open_generic_bindings = dict(snapshot.open_generic_bindings)
+        self._bundle_contracts = dict(snapshot.bundle_contracts)
         self._activations = tuple(sorted(snapshot.activations, key=lambda item: item.order))
         self._interceptors = tuple(sorted(snapshot.interceptors, key=lambda item: item.order))
         self._autowire_policy = snapshot.autowire_policy
@@ -38,6 +41,9 @@ class RuntimeRegistry(RegistryPort):
     def can_resolve(self, key: ServiceKey) -> bool:
         return self.registration_for(key, suppress_autowire_errors=True) is not None
 
+    def bundle_contract(self, name: str) -> BundleContract | None:
+        return self._bundle_contracts.get(name)
+
     def catalog(self, *, include_dynamic: bool = False) -> tuple[RegistrationInfo, ...]:
         items: list[RegistrationInfo] = []
 
@@ -48,6 +54,9 @@ class RuntimeRegistry(RegistryPort):
                     kind="single",
                     lifetime=registration.lifetime,
                     description=registration.description,
+                    bundle=registration.bundle,
+                    source=registration.source,
+                    source_location=registration.source_location,
                 )
             )
         for key, registrations in self._multi_registrations.items():
@@ -58,6 +67,9 @@ class RuntimeRegistry(RegistryPort):
                         kind="multi",
                         lifetime=registration.lifetime,
                         description=registration.description,
+                        bundle=registration.bundle,
+                        source=registration.source,
+                        source_location=registration.source_location,
                     )
                 )
         for key, binding in self._open_generic_bindings.items():
@@ -67,6 +79,9 @@ class RuntimeRegistry(RegistryPort):
                     kind="open_generic",
                     lifetime=binding.lifetime,
                     description=binding.description,
+                    bundle=getattr(binding, "bundle", None),
+                    source=getattr(binding, "source", None),
+                    source_location=getattr(binding, "source_location", None),
                 )
             )
         if include_dynamic:
@@ -77,6 +92,9 @@ class RuntimeRegistry(RegistryPort):
                         kind="autowire",
                         lifetime=registration.lifetime,
                         description=registration.description,
+                        bundle=registration.bundle,
+                        source=registration.source,
+                        source_location=registration.source_location,
                     )
                 )
             for registration in self._closed_generic_registrations.values():
@@ -86,9 +104,15 @@ class RuntimeRegistry(RegistryPort):
                         kind="closed_generic",
                         lifetime=registration.lifetime,
                         description=registration.description,
+                        bundle=registration.bundle,
+                        source=registration.source,
+                        source_location=registration.source_location,
                     )
                 )
         return tuple(sorted(items, key=lambda item: (repr(item.key), item.kind, item.description)))
+
+    def compose_registration(self, registration: Registration) -> Registration:
+        return compose_registration(registration, activations=self._activations, interceptors=self._interceptors)
 
     def registration_for(self, key: ServiceKey, *, suppress_autowire_errors: bool) -> Registration | None:
         registration = self._registrations.get(key)
@@ -107,10 +131,15 @@ class RuntimeRegistry(RegistryPort):
             try:
                 registration = self._specialize_open_generic(key, self._open_generic_bindings[origin])
             except ResolutionError as exc:
-                self._closed_generic_failures[key] = exc
+                failure = (
+                    exc
+                    if isinstance(exc, OpenGenericResolutionError)
+                    else OpenGenericResolutionError(details={"key": describe_key(key), "reason": str(exc)})
+                )
+                self._closed_generic_failures[key] = failure
                 if suppress_autowire_errors:
                     return None
-                raise exc
+                raise failure
             self._closed_generic_registrations[key] = registration
             return registration
         failure = self._autowire_failures.get(key)
@@ -125,7 +154,7 @@ class RuntimeRegistry(RegistryPort):
         try:
             registration = self._autowire_registration(key)
         except (TypeError, ValueError, ResolutionError) as exc:
-            failure = exc if isinstance(exc, ResolutionError) else ResolutionError(str(exc))
+            failure = AutowireError(details={"key": describe_key(key), "reason": str(exc)})
             self._autowire_failures[key] = failure
             if suppress_autowire_errors:
                 return None
@@ -144,7 +173,7 @@ class RuntimeRegistry(RegistryPort):
         if single is not None:
             registrations.append(single)
         registrations.extend(self._multi_registrations.get(key, ()))
-        return tuple(registrations)
+        return tuple(sorted(registrations, key=lambda registration: registration.collection_order))
 
     def invocation_plan(self, target: Callable[..., Any]) -> CallPlan:
         plan = self._invocation_plans.get(target)
@@ -176,14 +205,16 @@ class RuntimeRegistry(RegistryPort):
             dependencies=plan.dependencies,
             description=description,
             display=describe_key(implementation),
+            bundle=None,
+            source=describe_source(implementation),
+            source_location=describe_source_location(implementation),
         )
-        registration = self._apply_activations(registration)
-        return self._apply_interceptors(registration)
+        return self.compose_registration(registration)
 
     def _specialize_open_generic(self, key: ServiceKey, binding: OpenGenericBinding) -> Registration:
         args = get_args(key)
         if not args:
-            raise ResolutionError(f"Open generic resolution requires a closed generic key: {describe_key(key)}")
+            raise OpenGenericResolutionError(details={"key": describe_key(key), "needs_closed_key": True})
         implementation_map = type_var_map(binding.implementation_origin, args)
         description = f"{binding.description} for {describe_key(key)}"
         plan = compile_call_plan(
@@ -202,137 +233,9 @@ class RuntimeRegistry(RegistryPort):
             dependencies=plan.dependencies,
             description=description,
             display=describe_key(key),
+            collection_order=binding.collection_order,
+            bundle=getattr(binding, "bundle", None),
+            source=getattr(binding, "source", None),
+            source_location=getattr(binding, "source_location", None),
         )
-        registration = self._apply_activations(registration)
-        return self._apply_interceptors(registration)
-
-    def _apply_activations(self, registration: Registration) -> Registration:
-        wrapped = registration
-        for binding in self._activations:
-            wrapped = self._apply_activation_binding(wrapped, binding)
-        return wrapped
-
-    def _apply_activation_binding(self, registration: Registration, binding: ActivationBinding) -> Registration:
-        if not binding.predicate(registration.service_key, registration.lifetime):
-            return registration
-
-        provider = registration.provider
-        aprovider = registration.aprovider
-
-        def wrap_sync(
-            current: Callable[..., Any],
-            hook: Callable[..., Any],
-            *,
-            key: ServiceKey,
-            lifetime: Lifetime,
-        ) -> Callable[..., Any]:
-            def invoke(resolver: Any, context: Any) -> Any:
-                instance = current(resolver, context)
-                result = hook(instance, key=key, lifetime=lifetime)
-                return instance if result is None else result
-
-            return invoke
-
-        def wrap_async(
-            current: Callable[..., Any],
-            hook: Callable[..., Any],
-            ahook: Callable[..., Any] | None,
-            *,
-            key: ServiceKey,
-            lifetime: Lifetime,
-        ) -> Callable[..., Any]:
-            async def invoke(resolver: Any, context: Any) -> Any:
-                instance = await maybe_await(current(resolver, context))
-                target_hook = ahook or hook
-                result = await maybe_await(target_hook(instance, key=key, lifetime=lifetime))
-                return instance if result is None else result
-
-            return invoke
-
-        return Registration(
-            service_key=registration.service_key,
-            graph_key=registration.graph_key,
-            lifetime=registration.lifetime,
-            provider=wrap_sync(provider, binding.hook, key=registration.service_key, lifetime=registration.lifetime),
-            aprovider=wrap_async(
-                aprovider,
-                binding.hook,
-                binding.ahook,
-                key=registration.service_key,
-                lifetime=registration.lifetime,
-            ),
-            dependencies=registration.dependencies,
-            description=registration.description,
-            display=registration.display,
-            cache_token=registration.cache_token,
-            cache=registration.cache,
-            activation_hooks=registration.activation_hooks + (getattr(binding.hook, "__name__", type(binding.hook).__name__),),
-            interceptors=registration.interceptors,
-        )
-
-    def _apply_interceptors(self, registration: Registration) -> Registration:
-        bindings = sorted(
-            (binding for binding in self._interceptors if binding.predicate(registration.service_key, registration.lifetime)),
-            key=lambda item: item.order,
-        )
-        if not bindings:
-            return registration
-
-        provider = registration.provider
-        aprovider = registration.aprovider
-
-        def wrap_sync(
-            current: Callable[..., Any],
-            interceptor: Callable[..., Any],
-            *,
-            key: ServiceKey,
-            lifetime: Lifetime,
-        ) -> Callable[..., Any]:
-            def invoke(resolver: Any, context: Any) -> Any:
-                instance = current(resolver, context)
-                return interceptor(instance, key=key, lifetime=lifetime)
-
-            return invoke
-
-        def wrap_async(
-            current: Callable[..., Any],
-            interceptor: Callable[..., Any],
-            ainterceptor: Callable[..., Any] | None,
-            *,
-            key: ServiceKey,
-            lifetime: Lifetime,
-        ) -> Callable[..., Any]:
-            async def invoke(resolver: Any, context: Any) -> Any:
-                instance = await maybe_await(current(resolver, context))
-                if ainterceptor is not None:
-                    return await maybe_await(ainterceptor(instance, key=key, lifetime=lifetime))
-                return interceptor(instance, key=key, lifetime=lifetime)
-
-            return invoke
-
-        for binding in bindings:
-            provider = wrap_sync(provider, binding.interceptor, key=registration.service_key, lifetime=registration.lifetime)
-            aprovider = wrap_async(
-                aprovider,
-                binding.interceptor,
-                binding.ainterceptor,
-                key=registration.service_key,
-                lifetime=registration.lifetime,
-            )
-
-        return Registration(
-            service_key=registration.service_key,
-            graph_key=registration.graph_key,
-            lifetime=registration.lifetime,
-            provider=provider,
-            aprovider=aprovider,
-            dependencies=registration.dependencies,
-            description=registration.description,
-            display=registration.display,
-            cache_token=registration.cache_token,
-            cache=registration.cache,
-            activation_hooks=registration.activation_hooks,
-            interceptors=registration.interceptors + tuple(
-                getattr(binding.interceptor, "__name__", type(binding.interceptor).__name__) for binding in bindings
-            ),
-        )
+        return self.compose_registration(registration)

@@ -10,31 +10,51 @@ from ..runtime.registry import RuntimeRegistry
 
 
 @dataclass(frozen=True, slots=True)
+class _InspectionRuntime:
+    registry: RuntimeRegistry
+    inspector: GraphInspector
+
+
+@dataclass(frozen=True, slots=True)
 class CompiledGraph:
     snapshot: RegistrySnapshot
     validate_on_build: bool = False
 
-    def build(self) -> Container:
-        container = Container(self.snapshot)
+    def _new_container(self) -> Container:
+        return Container(self.snapshot)
+
+    def _prepare_container(self, container: Container) -> Container:
         if self.validate_on_build:
             container.validate()
         return container
 
+    def _inspection_runtime(self) -> _InspectionRuntime:
+        registry = RuntimeRegistry(self.snapshot)
+        return _InspectionRuntime(registry=registry, inspector=GraphInspector(registry))
+
+    def build(self, *, warmup: tuple[ServiceKey, ...] = ()) -> Container:
+        container = self._prepare_container(self._new_container())
+        if warmup:
+            container.warmup(*warmup)
+        return container
+
     def create_container(self) -> Container:
-        return self.build()
+        return self._prepare_container(self._new_container())
+
+    async def abuild(self, *, warmup: tuple[ServiceKey, ...] = ()) -> Container:
+        container = self._prepare_container(self._new_container())
+        if warmup:
+            await container.awarmup(*warmup)
+        return container
 
     def validate(self, *roots: ServiceKey) -> None:
-        inspector = GraphInspector(RuntimeRegistry(self.snapshot))
-        inspector.validate(*roots)
+        self._inspection_runtime().inspector.validate(*roots)
 
     def explain(self, key: ServiceKey) -> str:
-        inspector = GraphInspector(RuntimeRegistry(self.snapshot))
-        return inspector.explain(key)
+        return self._inspection_runtime().inspector.explain(key)
 
     def doctor(self, *roots: ServiceKey) -> DoctorReport:
-        inspector = GraphInspector(RuntimeRegistry(self.snapshot))
-        return inspector.doctor(*roots)
+        return self._inspection_runtime().inspector.doctor(*roots)
 
     def catalog(self, *, include_dynamic: bool = False) -> tuple[RegistrationInfo, ...]:
-        registry = RuntimeRegistry(self.snapshot)
-        return registry.catalog(include_dynamic=include_dynamic)
+        return self._inspection_runtime().registry.catalog(include_dynamic=include_dynamic)

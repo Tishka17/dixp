@@ -20,6 +20,9 @@ classifiers = [
   "Topic :: Software Development :: Libraries",
 ]
 
+[project.scripts]
+dixp-doctor = "dixp.doctor:main"
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 

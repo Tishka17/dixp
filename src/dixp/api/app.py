@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
+from ..config import from_env
 from ..configuration.compiled import CompiledGraph
 from ..configuration.declarative import ModuleSpec, module
 from ..configuration.modern import Builder, EnterpriseMode, StrictMode
+from ..core.errors import RegistrationError
 from ..core.models import Lifetime, RegistrationInfo, ServiceKey, qualified
 from ..inspection.graph import DoctorReport
 
@@ -41,6 +43,14 @@ def _resolve_key(key: ServiceKey, *, name: str | None, namespace: str | None) ->
     return named(key, name, namespace=namespace)
 
 
+def _resolve_settings_type(key: ServiceKey, settings_type: type[Any] | None) -> type[Any]:
+    if settings_type is not None:
+        return settings_type
+    if isinstance(key, type):
+        return key
+    raise RegistrationError(code="env_binding_requires_settings_type", details={"key": repr(key)})
+
+
 def _bind(
     builder: Builder,
     key: ServiceKey,
@@ -72,9 +82,13 @@ class Blueprint:
         """Expose the immutable compiled snapshot."""
         return self._compiled.snapshot
 
-    def start(self):
+    def start(self, *, warmup: tuple[ServiceKey, ...] = ()):
         """Build a runtime container from this blueprint."""
-        return self._compiled.build()
+        return self._compiled.build(warmup=warmup)
+
+    async def astart(self, *, warmup: tuple[ServiceKey, ...] = ()):
+        """Build a runtime container and warm it up through the async API."""
+        return await self._compiled.abuild(warmup=warmup)
 
     def validate(self, *roots: ServiceKey) -> None:
         """Validate the graph, optionally focusing on specific roots."""
@@ -114,6 +128,24 @@ class App:
     ) -> "App":
         """Bind a concrete value under a service key."""
         return self.bind(key, name=name, namespace=namespace).value(value, replace=replace)
+
+    def env(
+        self,
+        key: ServiceKey,
+        settings_type: type[Any] | None = None,
+        *,
+        prefix: str = "",
+        profile: str | None = None,
+        env: Mapping[str, str] | None = None,
+        name: str | None = None,
+        namespace: str | None = None,
+        replace: bool | None = None,
+    ) -> "App":
+        """Load a dataclass settings object from environment variables and bind it as a value."""
+        resolved_key = _resolve_key(key, name=name, namespace=namespace)
+        resolved_type = _resolve_settings_type(key, settings_type)
+        value = from_env(resolved_type, prefix=prefix, profile=profile, env=env)
+        return self.value(resolved_key, value, replace=replace)
 
     def singleton(
         self,
@@ -211,9 +243,13 @@ class App:
         """Compile the app into an inspectable blueprint."""
         return Blueprint(self._builder.compile(validate=validate))
 
-    def start(self, *, validate: bool | None = None):
+    def start(self, *, validate: bool | None = None, warmup: tuple[ServiceKey, ...] = ()):
         """Build a runtime container."""
-        return self.freeze(validate=validate).start()
+        return self.freeze(validate=validate).start(warmup=warmup)
+
+    async def astart(self, *, validate: bool | None = None, warmup: tuple[ServiceKey, ...] = ()):
+        """Build a runtime container and warm it up through the async API."""
+        return await self.freeze(validate=validate).astart(warmup=warmup)
 
     def test(self):
         """Open the testing helper API."""
@@ -255,6 +291,20 @@ class BindingBuilder:
 
     def value(self, value: Any, *, replace: bool | None = None) -> App:
         """Alias for ``instance(...)``."""
+        return self.instance(value, replace=replace)
+
+    def env(
+        self,
+        settings_type: type[Any] | None = None,
+        *,
+        prefix: str = "",
+        profile: str | None = None,
+        env: Mapping[str, str] | None = None,
+        replace: bool | None = None,
+    ) -> App:
+        """Load a dataclass settings object from environment variables and bind it as a value."""
+        resolved_type = _resolve_settings_type(self.key, settings_type)
+        value = from_env(resolved_type, prefix=prefix, profile=profile, env=env)
         return self.instance(value, replace=replace)
 
     def transient(self, target: type[Any] | Callable[..., Any], *, replace: bool | None = None) -> App:

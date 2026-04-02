@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar, Token
 from typing import Any, Callable, TypeVar
 
-from ..core.errors import ContainerClosedError, ResolutionError
+from ..core.errors import AmbientResolverError, ContainerClosedError, InvalidOverrideError, MissingRegistrationError
 from ..core.graph import (
     MISSING,
     Registration,
@@ -12,6 +13,8 @@ from ..core.graph import (
     collection_spec,
     compile_call_plan,
     describe_key,
+    describe_source,
+    describe_source_location,
     request_wrapper_spec,
 )
 from ..core.models import Factory, Lazy, Lifetime, Provider, RegistrationInfo, ServiceKey
@@ -23,6 +26,69 @@ from .cache import InstanceCache
 from .registry import RuntimeRegistry
 
 T = TypeVar("T")
+ContextBinding = tuple[ServiceKey, Any]
+_CURRENT_RESOLVER: ContextVar["_Resolver | None"] = ContextVar("dixp_current_resolver", default=None)
+
+
+def current_resolver() -> "Container | Scope":
+    resolver = _CURRENT_RESOLVER.get()
+    if resolver is None:
+        raise AmbientResolverError(
+            details={"hint": "Use `with container.activate(...):` or `with scope.activate():`."}
+        )
+    return resolver
+
+
+class _ActiveResolverContext:
+    def __init__(self, resolver: "_Resolver", bindings: tuple[ContextBinding, ...]) -> None:
+        self._base_resolver = resolver
+        self._bindings = bindings
+        self._active_resolver: "_Resolver" = resolver
+        self._scope: Scope | None = None
+        self._stack: ExitStack | None = None
+        self._token: Token[_Resolver | None] | None = None
+
+    def __enter__(self) -> "Container | Scope":
+        self._base_resolver._assert_open()
+        scope = self._base_resolver.scope()
+        stack = ExitStack()
+        try:
+            for key, value in self._bindings:
+                stack.enter_context(scope.override(key, value))
+            self._active_resolver = scope
+            self._scope = scope
+            self._stack = stack
+        except Exception:
+            stack.close()
+            scope.close()
+            raise
+        self._token = _CURRENT_RESOLVER.set(self._active_resolver)
+        return self._active_resolver
+
+    def __exit__(self, *_: Any) -> None:
+        if self._token is not None:
+            _CURRENT_RESOLVER.reset(self._token)
+            self._token = None
+        if self._stack is not None:
+            self._stack.close()
+            self._stack = None
+        if self._scope is not None:
+            self._scope.close()
+            self._scope = None
+
+    async def __aenter__(self) -> "Container | Scope":
+        return self.__enter__()
+
+    async def __aexit__(self, *_: Any) -> None:
+        if self._token is not None:
+            _CURRENT_RESOLVER.reset(self._token)
+            self._token = None
+        if self._stack is not None:
+            self._stack.close()
+            self._stack = None
+        if self._scope is not None:
+            await self._scope.aclose()
+            self._scope = None
 
 
 class _Resolver:
@@ -35,7 +101,7 @@ class _Resolver:
     def _assert_open(self) -> None:
         return None
 
-    def _missing_registration_message(self, key: ServiceKey) -> str:
+    def _missing_registration_details(self, key: ServiceKey) -> dict[str, object]:
         target = describe_key(key)
         suggestions = [
             f"add `@service(provides={target})` to an implementation",
@@ -47,7 +113,7 @@ class _Resolver:
                 "use a typed key instead of a bare string in app code",
                 f"or bind the string explicitly with `app.bind({key!r}).value(...)`",
             ]
-        return f"No service for {target}. Try one of these fixes:\n- " + "\n- ".join(suggestions)
+        return {"key": target, "suggestions": tuple(suggestions)}
 
     def __getitem__(self, key: ServiceKey) -> Any:
         return self.get(key)
@@ -108,6 +174,22 @@ class _Resolver:
     def child(self) -> "Scope":
         return self.scope()
 
+    def activate(self, *bindings: ContextBinding) -> _ActiveResolverContext:
+        self._assert_open()
+        return _ActiveResolverContext(self, tuple(bindings))
+
+    def warmup(self, *keys: ServiceKey) -> "_Resolver":
+        self._assert_open()
+        for key in keys:
+            self.resolve(key)
+        return self
+
+    async def awarmup(self, *keys: ServiceKey) -> "_Resolver":
+        self._assert_open()
+        for key in keys:
+            await self.aresolve(key)
+        return self
+
     @contextmanager
     def override(
         self,
@@ -144,7 +226,7 @@ class _Resolver:
             return self._resolve_collection(key, context)
         registration = self._find_registration(key, suppress_autowire_errors=False)
         if registration is None:
-            raise ResolutionError(self._missing_registration_message(key))
+            raise MissingRegistrationError(details=self._missing_registration_details(key))
         nested_context = context.enter(registration.graph_key, registration.lifetime, display=registration.display)
         return registration.resolve(self, nested_context)
 
@@ -157,7 +239,7 @@ class _Resolver:
             return await self._aresolve_collection(key, context)
         registration = self._find_registration(key, suppress_autowire_errors=False)
         if registration is None:
-            raise ResolutionError(self._missing_registration_message(key))
+            raise MissingRegistrationError(details=self._missing_registration_details(key))
         nested_context = context.enter(registration.graph_key, registration.lifetime, display=registration.display)
         return await registration.aresolve(self, nested_context)
 
@@ -261,7 +343,7 @@ class Container(_Resolver):
         self._override_parent = None
         self._registry: RegistryPort = RuntimeRegistry(snapshot)
         self._inspector: InspectorPort = GraphInspector(self._registry)
-        self._singleton_cache: CachePort = InstanceCache(async_error_message="Async singleton provider requires aresolve()")
+        self._singleton_cache: CachePort = InstanceCache(async_error_scope="singleton")
         self._closed = False
 
     def __enter__(self) -> "Container":
@@ -270,9 +352,15 @@ class Container(_Resolver):
     def __exit__(self, *_: Any) -> None:
         self.close()
 
+    async def __aenter__(self) -> "Container":
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        await self.aclose()
+
     def _assert_open(self) -> None:
         if self._closed:
-            raise ContainerClosedError("Container is closed")
+            raise ContainerClosedError(details={"target": "container"})
 
     def close(self) -> None:
         if self._closed:
@@ -321,7 +409,7 @@ class Container(_Resolver):
         lifetime: Lifetime,
     ) -> Registration:
         if value is not MISSING:
-            return Registration(
+            registration = Registration(
                 service_key=key,
                 graph_key=key,
                 lifetime=Lifetime.SINGLETON,
@@ -330,7 +418,10 @@ class Container(_Resolver):
                 dependencies=(),
                 description=f"override instance for {describe_key(key)}",
                 display=describe_key(key),
+                source=describe_source(value, instance=True),
+                source_location=describe_source_location(value, instance=True),
             )
+            return self._registry.compose_registration(registration)
         if implementation is not None:
             description = f"override implementation {describe_key(implementation)} for {describe_key(key)}"
             plan = compile_call_plan(
@@ -339,7 +430,7 @@ class Container(_Resolver):
                 strict=True,
                 description=description,
             )
-            return Registration(
+            registration = Registration(
                 service_key=key,
                 graph_key=key,
                 lifetime=lifetime,
@@ -348,11 +439,14 @@ class Container(_Resolver):
                 dependencies=plan.dependencies,
                 description=description,
                 display=describe_key(key),
+                source=describe_source(implementation),
+                source_location=describe_source_location(implementation),
             )
+            return self._registry.compose_registration(registration)
         if factory is not None:
             description = f"override factory {describe_key(factory)} for {describe_key(key)}"
             plan = compile_call_plan(factory, strict=True, description=description)
-            return Registration(
+            registration = Registration(
                 service_key=key,
                 graph_key=key,
                 lifetime=lifetime,
@@ -361,8 +455,11 @@ class Container(_Resolver):
                 dependencies=plan.dependencies,
                 description=description,
                 display=describe_key(key),
+                source=describe_source(factory),
+                source_location=describe_source_location(factory),
             )
-        raise ResolutionError(f"Override for {describe_key(key)} requires value, implementation, or factory")
+            return self._registry.compose_registration(registration)
+        raise InvalidOverrideError(details={"key": describe_key(key)})
 
 
 class Scope(_Resolver):
@@ -370,7 +467,7 @@ class Scope(_Resolver):
         super().__init__()
         self._container = container
         self._override_parent = override_parent
-        self._scoped_cache: CachePort = InstanceCache(async_error_message="Async scoped provider requires aresolve()")
+        self._scoped_cache: CachePort = InstanceCache(async_error_scope="scoped")
         self._closed = False
 
     def __enter__(self) -> "Scope":
@@ -379,9 +476,15 @@ class Scope(_Resolver):
     def __exit__(self, *_: Any) -> None:
         self.close()
 
+    async def __aenter__(self) -> "Scope":
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        await self.aclose()
+
     def _assert_open(self) -> None:
         if self._closed or self._container._closed:
-            raise ContainerClosedError("Scope is closed")
+            raise ContainerClosedError(details={"target": "scope"})
 
     def close(self) -> None:
         if self._closed:

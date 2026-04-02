@@ -5,7 +5,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from ..core.graph import OpenGenericBinding, Registration
-from ..core.models import ActivationBinding, AutowirePolicy, InterceptorBinding, ServiceKey
+from ..core.models import ActivationBinding, AutowirePolicy, BundleContract, InterceptorBinding, ServiceKey
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,6 +13,7 @@ class RegistrySnapshot:
     registrations: Mapping[ServiceKey, Registration]
     multi_registrations: Mapping[ServiceKey, tuple[Registration, ...]]
     open_generic_bindings: Mapping[ServiceKey, OpenGenericBinding]
+    bundle_contracts: Mapping[str, BundleContract]
     activations: tuple[ActivationBinding, ...]
     interceptors: tuple[InterceptorBinding, ...]
     autowire_policy: AutowirePolicy
@@ -25,5 +26,6 @@ class RegistrySnapshot:
             MappingProxyType({key: tuple(value) for key, value in self.multi_registrations.items()}),
         )
         object.__setattr__(self, "open_generic_bindings", MappingProxyType(dict(self.open_generic_bindings)))
+        object.__setattr__(self, "bundle_contracts", MappingProxyType(dict(self.bundle_contracts)))
         object.__setattr__(self, "activations", tuple(self.activations))
         object.__setattr__(self, "interceptors", tuple(self.interceptors))

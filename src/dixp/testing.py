@@ -106,9 +106,13 @@ class TestApp:
         fake = stub(name=stub_name or f"{getattr(key, '__name__', 'Service')}Stub", **attrs)
         return self.with_instance(key, fake, name=name, namespace=namespace)
 
-    def start(self, *, validate: bool | None = None):
+    def start(self, *, validate: bool | None = None, warmup: tuple[ServiceKey, ...] = ()):
         """Build a runtime container for the test graph."""
-        return self.app.start(validate=validate)
+        return self.app.start(validate=validate, warmup=warmup)
+
+    async def astart(self, *, validate: bool | None = None, warmup: tuple[ServiceKey, ...] = ()):
+        """Build a runtime container for the test graph and warm it through the async API."""
+        return await self.app.astart(validate=validate, warmup=warmup)
 
     def freeze(self, *, validate: bool | None = None):
         """Compile the test graph into a blueprint."""

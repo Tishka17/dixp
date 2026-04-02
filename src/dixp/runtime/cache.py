@@ -5,7 +5,7 @@ import inspect
 import threading
 from typing import Any, Callable
 
-from ..core.errors import ResolutionError
+from ..core.errors import AsyncApiUsageError
 from ..core.graph import maybe_await, maybe_awaitable_close
 
 
@@ -36,11 +36,12 @@ def iter_unique_cached_values(cache: dict[object, Any]) -> tuple[Any, ...]:
 
 
 class InstanceCache:
-    def __init__(self, *, async_error_message: str) -> None:
+    def __init__(self, *, async_error_scope: str, async_api: str = "aresolve()") -> None:
         self._values: dict[object, Any] = {}
         self._lock = threading.RLock()
         self._async_locks: dict[object, asyncio.Lock] = {}
-        self._async_error_message = async_error_message
+        self._async_error_scope = async_error_scope
+        self._async_api = async_api
 
     def get_or_create(self, token: object, factory: Callable[[], Any]) -> Any:
         if token in self._values:
@@ -50,7 +51,7 @@ class InstanceCache:
                 value = factory()
                 if inspect.isawaitable(value):
                     maybe_awaitable_close(value)
-                    raise ResolutionError(self._async_error_message)
+                    raise AsyncApiUsageError(details={"scope": self._async_error_scope, "api": self._async_api})
                 self._values[token] = value
             return self._values[token]
 
