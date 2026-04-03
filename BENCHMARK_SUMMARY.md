@@ -40,6 +40,13 @@ Compared libraries:
 
 This snapshot was regenerated after aligning the competitor adapters with the current documented APIs for `injector`, `lagom`, `punq`, `dishka`, and `wireup`, including native collection APIs where those libraries expose them, and now also includes composite `start_ready` and `request_cycle` workloads.
 
+It should be read as a job-equivalent comparison, not a method-name comparison. Different libraries may use different native APIs to solve the same task:
+
+- collection aggregation may be `all(T)`, multibindings, `collect(...)`, `resolve_all(...)`, or `list[T]`
+- injected calls may be `call(...)`, wiring/decorator-based handlers, partially bound callables, or native resolution plus function invocation when no callable API exists
+- request lifetimes may be child scopes, nested containers, child injectors, request scopes, or `enter_scope(...)`
+- startup readiness may be explicit warmup, resource initialization, eager first-request touching, or handler preparation
+
 Its strongest story remains:
 
 - architecture validation
@@ -64,6 +71,8 @@ Out of 7 libraries:
 - `request_cycle`: 6th
 
 That means `dixp` currently sits in the lower half on every measured runtime-speed metric, including the added composite startup and request-cycle scenarios. Its best relative results are now `validate`, `collection_all`, `call`, and `request_cycle`.
+
+`validate` needs extra care when comparing libraries: some competitors expose a native validation/check API, while others only expose native root resolution paths. That metric is still useful, but less symmetrical than the hot-path runtime metrics.
 
 ## Metric Winners
 
@@ -114,6 +123,13 @@ The benchmark does not support these claims:
 - `dixp` beats `lagom` on throughput
 - `dixp` beats `dishka` on throughput
 - `dixp` beats `wireup` on throughput
+
+The benchmark also does not yet cover several equally important feature-equivalent scenarios:
+
+- async startup and async request paths
+- override and test-replacement cost
+- failure diagnostics quality
+- configuration and qualifier/parameter resolution
 
 ## Next Optimization Targets
 

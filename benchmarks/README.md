@@ -57,6 +57,27 @@ The harness measures these scenarios:
 The first group (`freeze`, `start`, `validate`, `singleton_get`, `scoped_get`, `collection_all`, `call`) remains microbenchmark-oriented.
 The added `start_ready` and `request_cycle` workloads are composite scenarios intended to better reflect actual application startup and per-request cost.
 
+## Equivalence Rules
+
+The harness compares jobs, not method names.
+
+Different libraries often solve the same operational problem through different native APIs, so adapters are expected to choose the most direct documented path for the job being measured instead of forcing all competitors into the same method shape.
+
+Current equivalence rules:
+
+- `collection_all` means native collection resolution, whether that is exposed as multibinding, aggregation, `collect(...)`, `resolve_all(...)`, or direct `list[T]` registration and resolution.
+- `call` means native injected handler invocation. That can be a direct `call(...)` API, a documented injection wrapper/decorator, or a native partially bound callable. If a library has no native callable-injection API, the adapter may only use native `resolve(...)` operations to assemble the callable arguments.
+- `start_ready` means startup to a first-request-ready state. Native warmup, resource initialization, eager handler preparation, or an explicit first-request dependency touch can all satisfy this job.
+- `request_cycle` means one realistic request-shaped execution using the library's native scope or request-lifetime mechanism. Child containers, request scopes, nested containers, child injectors, and `enter_scope(...)` style APIs are all equivalent here.
+- `validate` is the least uniform workload. When a library exposes a native validation or dependency-check API, the adapter should use it. When it does not, the harness may use native root resolutions as a proxy. Treat `validate` as informative, not as a perfectly symmetrical diagnostic benchmark.
+
+The current harness still does not cover several important capability-equivalent areas:
+
+- async startup and async request paths
+- override and test-time replacement workflows
+- failure quality and diagnostics depth
+- configuration, qualifiers, and parameter injection
+
 ## Output
 
 Default output is a human-readable table. JSON is also available:
@@ -93,5 +114,6 @@ If you want to compare `dixp` against other DI libraries, use the same workload 
 - identical benchmark loop sizes
 - warm the container before hot-path measurements
 - separate compile/start costs from hot resolve throughput
+- map equivalent native features to the same operational job instead of requiring identical method names
 
 Do not publish head-to-head claims until the competing dependency is installed and the adapter has been validated against the exact library version used in the benchmark environment.

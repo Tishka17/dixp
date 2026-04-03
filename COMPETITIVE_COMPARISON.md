@@ -21,7 +21,7 @@ That still does not make the numbers universal truth. The benchmark is:
 
 - local to one machine and one Python environment
 - adapter-based, not official vendor-maintained benchmark code
-- workload-equivalent, not feature-equivalent, across libraries
+- workload-equivalent across libraries, with adapters allowed to use different native APIs for the same job
 - strongest as a reality check, not as absolute proof of superiority
 
 ## Compared Libraries
@@ -81,6 +81,43 @@ The benchmark snapshot does not show `dixp` as the raw throughput leader. It doe
 - `dixp` loses clearly to `dependency-injector`, `injector`, `dishka`, and `wireup` on most measured hot-path metrics
 - `lagom` is faster on every measured metric in this snapshot
 
+## Capability Equivalence Rules
+
+This comparison should not be read as "which library has the same method names as `dixp`". It is trying to compare the same operational job even when the native APIs differ.
+
+Current benchmark interpretation:
+
+1. `collection_all` is a collection-resolution job.
+   Native multibindings, aggregate/list providers, `collect(...)`, `resolve_all(...)`, and direct `list[T]` registrations all count as equivalent ways to do that job.
+
+2. `call` is an injected-handler job.
+   Direct `call(...)`, documented injection decorators/wrappers, partially bound callables, and framework-style handler binding can all represent the same capability. One-time wrapper creation belongs in startup, not in the hot-path loop. If a library has no native callable-injection API, only native `resolve(...)` calls may be used to assemble the arguments.
+
+3. `start_ready` is a readiness job, not just a constructor call.
+   Explicit warmup, resource initialization, eager handler preparation, or touching the first-request dependency chain are equivalent ways to reach "ready for the first real request".
+
+4. `request_cycle` is a request-lifetime job.
+   Child scopes, request-scoped containers, child injectors, nested containers, and `enter_scope(...)` style APIs are all equivalent if they model one request-shaped execution and cleanup.
+
+5. `validate` is only partially symmetrical.
+   Some libraries expose a native graph/dependency validation API. Others do not, so the harness falls back to native root resolution as a proxy. That makes `validate` the noisiest metric in the current table.
+
+## Important Capability Classes Not Yet Benchmarked
+
+Several feature-equivalent areas are still missing from the numbers:
+
+1. Async execution.
+   `dixp` has `aget()`, `aall()`, `acall()`, `awarmup()`, and `astart()`, while competitors like `dependency-injector`, `lagom`, `dishka`, and `wireup` also expose native async paths. The current snapshot is still sync-heavy.
+
+2. Override and test-replacement workflows.
+   Different libraries expose this through different APIs, but it is the same operational job: temporarily replace dependencies for one test or one request scope.
+
+3. Failure-path quality.
+   Human-readable diagnostics, dependency-check output, graph explanations, and error payload quality matter, but they are not latency numbers.
+
+4. Configuration, qualifiers, and parameter injection.
+   Some libraries solve this with config providers, some with qualifiers, some with annotated parameters, and some with explicit value binding. Those are comparable jobs with different shapes.
+
 ## What `dixp` Can Honestly Claim Today
 
 Compared with most Python DI containers, `dixp` is unusually strong in these areas:
@@ -99,6 +136,8 @@ Compared with most Python DI containers, `dixp` is unusually strong in these are
 
 5. Explicit runtime ergonomics.
    `get()`, `all()`, `call()`, `warmup()`, `activate()`, `override()`, scopes, sync/async APIs, and validation are exposed as explicit tasks instead of hidden magic.
+
+Several competitors can cover parts of those same jobs through differently named APIs. The differentiator for `dixp` is not "it alone has a feature with this exact spelling", but that it keeps many of those jobs explicit in one coherent surface while also adding architecture controls and diagnostics.
 
 ## Where `dixp` Should Be Careful
 
@@ -133,6 +172,7 @@ Where `dixp` is better:
 Where `dependency-injector` is stronger:
 - broader ecosystem maturity
 - more established provider model
+- several jobs that `dixp` exposes as `warmup()` / `call()` / `override()` are covered there through `Resource`, wiring, and provider overriding
 - dramatically stronger raw throughput in this local benchmark snapshot
 
 Speed claim:
@@ -158,6 +198,7 @@ Where `dixp` is better:
 
 Where `injector` is stronger:
 - familiar mental model for teams that already like Guice-style modules
+- the same jobs are often expressed there through modules, `call_with_injection()`, `multibind()`, and child injectors rather than a unified task-shaped runtime API
 
 Speed claim:
 - In the current local benchmark, `injector` is faster on every measured metric.
@@ -182,6 +223,7 @@ Where `dixp` is better:
 Where `lagom` is stronger:
 - lighter "minimum ceremony" positioning
 - may feel more natural for teams that want auto-wiring with minimal container surface
+- some equivalent jobs are split across `magic_partial(...)`, `clone()`, and request-singleton integration helpers instead of explicit runtime task methods
 
 Speed claim:
 - In the current local benchmark, `lagom` is faster on every measured metric.
@@ -209,6 +251,7 @@ Where `dixp` is better:
 Where `punq` is stronger:
 - much smaller mental model
 - lower adoption cost for tiny projects
+- most equivalent jobs reduce to `register(...)`, `resolve(...)`, and `resolve_all(...)`, which keeps the surface tiny but also narrower
 
 Speed claim:
 - In the current local benchmark, `punq` is faster on `freeze`, `start`, `start_ready`, `singleton_get`, and `scoped_get`, while `dixp` is faster on `validate`, `collection_all`, `call`, and `request_cycle`.
@@ -233,6 +276,7 @@ Where `dixp` is better:
 Where `dishka` is stronger:
 - scope model is a central design focus
 - stronger ecosystem story for framework integrations around scoped execution
+- several jobs that `dixp` names directly are represented there as scope entry, context data, collection providers, and integration wrappers
 - much stronger raw performance in this local benchmark snapshot
 
 Speed claim:
@@ -260,6 +304,7 @@ Where `wireup` is stronger:
 - stronger public performance story
 - broader framework integration story
 - clearer "battle-tested" positioning
+- several equivalent jobs are expressed through handler injection, `enter_scope(...)`, overrides, params, and qualifiers rather than a single task-shaped runtime surface
 - much stronger raw performance in this local benchmark snapshot
 
 Speed claim:
@@ -300,8 +345,9 @@ The current snapshot is more useful now that it includes composite `start_ready`
 1. Cold graph compile / freeze time on a denser application graph.
 2. `start(validate=True)` and explicit warmup cost under more realistic graph size.
 3. Async request-path cost (`acall()` / async scopes / async resources).
-4. Concurrency under parallel request scopes.
-5. Failure-path quality:
+4. Override and test-replacement cost using each library's native override story.
+5. Concurrency under parallel request scopes.
+6. Failure-path quality:
    missing dependency, circular dependency, lifetime mismatch, bundle policy violation.
 
 The current snapshot already suggests that `dixp` is unlikely to win every microbenchmark or composite runtime benchmark. Its strongest story is:
