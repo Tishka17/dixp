@@ -29,6 +29,7 @@ The harness includes adapters for:
 
 If a competitor package is not installed, it is reported as `skipped`.
 If a package is installed but its API differs from the adapter assumptions, the harness reports an adapter failure instead of crashing the whole run.
+Adapters are expected to use the current documented native APIs of the versions installed in the local `.venv`, rather than reimplementing library behavior or keeping broad compatibility shims for older releases.
 
 ## Workloads
 
@@ -38,16 +39,23 @@ The harness measures these scenarios:
    Compile the app graph into a blueprint.
 2. `start`
    Build a runtime container from the compiled app.
-3. `validate`
+3. `start_ready`
+   Build a runtime container and eagerly touch the services needed for the first request.
+4. `validate`
    Validate the compiled graph.
-4. `singleton_get`
+5. `singleton_get`
    Repeated hot resolution of a singleton service.
-5. `scoped_get`
+6. `scoped_get`
    Repeated hot resolution of a scoped service inside an active scope.
-6. `collection_all`
+7. `collection_all`
    Repeated resolution of a multi-binding collection.
-7. `call`
+8. `call`
    Repeated dependency-injected callable invocation.
+9. `request_cycle`
+   A more realistic request path: resolve request-scoped state, collect plugins, run business logic, and close the scope.
+
+The first group (`freeze`, `start`, `validate`, `singleton_get`, `scoped_get`, `collection_all`, `call`) remains microbenchmark-oriented.
+The added `start_ready` and `request_cycle` workloads are composite scenarios intended to better reflect actual application startup and per-request cost.
 
 ## Output
 

@@ -15,12 +15,12 @@ Related docs:
 
 Values below are median latency per operation. Lower is better.
 
-| library | freeze | start | validate | singleton_get | scoped_get | collection_all | call |
-|---|---|---|---|---|---|---|---|
-| dixp | 33.078 ms | 32.943 ms | 40.4 us | 3.6 us | 19.0 us | 14.1 us | 43.2 us |
-| dependency-injector | 55.3 us | 196.8 us | 22.1 us | 61.0 ns | 516.4 ns | 923.8 ns | 3.0 us |
-| injector | 121.7 us | 205.0 us | 53.7 us | 1.3 us | 24.8 us | 2.7 us | 111.6 us |
-| lagom | 648.1 ns | 22.3 us | 1.6 us | 116.2 ns | 436.7 ns | 480.5 ns | 53.0 us |
-| punq | 139.9 ns | 35.4 us | 165.6 us | 711.6 ns | 13.2 us | 95.8 us | 159.8 us |
-| dishka | 233.0 us | 118.6 us | 13.6 us | 302.8 ns | 2.0 us | 310.9 ns | 3.1 us |
-| wireup | 76.4 us | 1.318 ms | 2.9 us | 84.7 ns | 2.0 us | 90.2 ns | 2.7 us |
+| library | freeze | start | start_ready | validate | singleton_get | scoped_get | collection_all | call | request_cycle |
+|---|---|---|---|---|---|---|---|---|---|
+| dixp | 37.767 ms | 38.106 ms | 37.895 ms | 39.8 us | 3.6 us | 19.3 us | 14.1 us | 43.7 us | 51.7 us |
+| dependency-injector | 57.1 us | 198.8 us | 221.4 us | 22.5 us | 64.2 ns | 568.1 ns | 958.8 ns | 3.2 us | 2.6 us |
+| injector | 116.2 us | 55.1 us | 171.1 us | 27.8 us | 1.4 us | 1.3 us | 2.9 us | 40.1 us | 24.5 us |
+| lagom | 886.6 ns | 17.4 us | 19.0 us | 1.4 us | 113.0 ns | 426.8 ns | 233.3 ns | 5.7 us | 1.5 us |
+| punq | 790.1 ns | 37.2 us | 245.9 us | 162.3 us | 537.4 ns | 13.4 us | 100.8 us | 167.4 us | 170.1 us |
+| dishka | 443.1 us | 168.5 us | 1.171 ms | 23.7 us | 284.2 ns | 2.0 us | 486.0 ns | 3.6 us | 3.1 us |
+| wireup | 18.9 us | 1.205 ms | 1.239 ms | 2.4 us | 85.6 ns | 1.1 us | 190.4 ns | 1.7 us | 1.8 us |

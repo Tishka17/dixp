@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager, nullcontext
 import importlib
 import importlib.util
-import inspect
 import json
 import statistics
 import time
@@ -13,6 +11,25 @@ from pathlib import Path
 from typing import Any, Callable, Protocol, runtime_checkable
 
 ROOT = Path(__file__).resolve().parents[1]
+
+try:
+    import wireup as _wireup
+except ImportError:
+    _wireup = None
+
+try:
+    from dishka.integrations.base import FromDishka as _dishka_from_dishka
+except ImportError:
+    _dishka_from_dishka = None
+
+
+class _AnnotationFallback:
+    def __class_getitem__(cls, item: Any) -> Any:
+        return item
+
+
+WireupInjected = _wireup.Injected if _wireup is not None else _AnnotationFallback
+DishkaInjected = _dishka_from_dishka if _dishka_from_dishka is not None else _AnnotationFallback
 
 
 @runtime_checkable
@@ -62,13 +79,24 @@ class GammaPlugin:
         return "gamma"
 
 
-@dataclass(frozen=True, slots=True)
-class PluginBundle:
-    items: tuple[Plugin, ...]
-
-
 def benchmark_handler(service: Service, repository: Repository, plugins: list[Plugin]) -> int:
     return service.repository.clock.now() + repository.clock.now() + len(plugins)
+
+
+def wireup_benchmark_handler(
+    service: WireupInjected[Service],
+    repository: WireupInjected[Repository],
+    plugins: WireupInjected[list[Plugin]],
+) -> int:
+    return benchmark_handler(service, repository, plugins)
+
+
+def dishka_benchmark_handler(
+    service: DishkaInjected[Service],
+    repository: DishkaInjected[Repository],
+    plugins: DishkaInjected[list[Plugin]],
+) -> int:
+    return benchmark_handler(service, repository, plugins)
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +194,21 @@ class DixpAdapter:
     def _container(self):
         return self._build_app().start()
 
+    @staticmethod
+    def _start_ready(app: Any):
+        container = app.start(validate=False)
+        container.get(Clock)
+        container.all(Plugin)
+        with container.child() as scope:
+            scope.get(Repository)
+            scope.get(Service)
+        return container
+
+    @staticmethod
+    def _request_cycle(container: Any) -> int:
+        with container.child() as scope:
+            return benchmark_handler(scope.get(Service), scope.get(Repository), scope.all(Plugin))
+
     def run(self, *, repeat: int, iterations: int) -> LibraryResult:
         metrics = [
             benchmark_metric(
@@ -183,6 +226,15 @@ class DixpAdapter:
                 repeat=repeat,
                 setup=self._build_app,
                 operation=lambda app: app.start(validate=False),
+                cleanup=lambda _app, container: container.close(),
+            ),
+            benchmark_metric(
+                "start_ready",
+                "seconds/op",
+                iterations=iterations,
+                repeat=repeat,
+                setup=self._build_app,
+                operation=self._start_ready,
                 cleanup=lambda _app, container: container.close(),
             ),
             benchmark_metric(
@@ -229,6 +281,15 @@ class DixpAdapter:
                 operation=lambda container: container.call(benchmark_handler),
                 cleanup=lambda container, _value: container.close(),
             ),
+            benchmark_metric(
+                "request_cycle",
+                "seconds/op",
+                iterations=iterations * 100,
+                repeat=repeat,
+                setup=self._container,
+                operation=self._request_cycle,
+                cleanup=lambda container, _value: container.close(),
+            ),
         ]
         return LibraryResult(
             library=self.library,
@@ -242,15 +303,6 @@ class DixpAdapter:
     def _scoped_get(container: Any) -> None:
         with container.child() as scope:
             scope.get(Repository)
-
-
-def _call_maybe(obj: Any, *method_names: str) -> Any:
-    for name in method_names:
-        method = getattr(obj, name, None)
-        if callable(method):
-            return method()
-    return None
-
 
 def _package_available(package: str) -> bool:
     return importlib.util.find_spec(package) is not None
@@ -319,15 +371,24 @@ class DependencyInjectorAdapter(ExternalAdapter):
         return self._build_container_class()()
 
     def _validate(self, container: Any) -> None:
-        check_dependencies = getattr(container, "check_dependencies", None)
-        if callable(check_dependencies):
-            check_dependencies()
+        container.check_dependencies()
         container.clock()
         container.service()
         container.plugins()
 
+    def _start_ready(self, container_cls: type[Any]) -> Any:
+        container = container_cls()
+        container.clock()
+        container.plugins()
+        container.repository()
+        container.service()
+        return container
+
+    def _request_cycle(self, container: Any) -> int:
+        return benchmark_handler(container.service(), container.repository(), container.plugins())
+
     def _close(self, container: Any) -> None:
-        _call_maybe(container, "shutdown_resources")
+        container.shutdown_resources()
 
     def _run(self, *, repeat: int, iterations: int) -> LibraryResult:
         metrics = [
@@ -346,6 +407,15 @@ class DependencyInjectorAdapter(ExternalAdapter):
                 repeat=repeat,
                 setup=self._build_container_class,
                 operation=lambda container_cls: container_cls(),
+                cleanup=lambda _state, container: self._close(container),
+            ),
+            benchmark_metric(
+                "start_ready",
+                "seconds/op",
+                iterations=iterations,
+                repeat=repeat,
+                setup=self._build_container_class,
+                operation=self._start_ready,
                 cleanup=lambda _state, container: self._close(container),
             ),
             benchmark_metric(
@@ -393,6 +463,15 @@ class DependencyInjectorAdapter(ExternalAdapter):
                 operation=lambda container: container.handler(),
                 cleanup=lambda container, _value: self._close(container),
             ),
+            benchmark_metric(
+                "request_cycle",
+                "seconds/op",
+                iterations=iterations * 100,
+                repeat=repeat,
+                setup=self._container,
+                operation=self._request_cycle,
+                cleanup=lambda container, _value: self._close(container),
+            ),
         ]
         return LibraryResult(
             library=self.library,
@@ -406,29 +485,10 @@ class DependencyInjectorAdapter(ExternalAdapter):
 class InjectorAdapter(ExternalAdapter):
     def __init__(self) -> None:
         super().__init__("injector", "injector")
+        self._cached_handler: Callable[..., int] | None = None
 
-    def _build_module(self) -> tuple[Any, type[Any], Callable[[Callable[..., Any]], Callable[..., Any]]]:
-        from injector import Binder, InstanceProvider, Module, Scope, ScopeDecorator, inject, provider, singleton
-
-        class RequestScope(Scope):
-            def __init__(self, injector: Any) -> None:
-                self.injector = injector
-                self._cache: dict[Any, Any] | None = None
-
-            def enter(self) -> None:
-                self._cache = {}
-
-            def exit(self) -> None:
-                self._cache = None
-
-            def get(self, key: Any, provider: Any) -> Any:
-                if self._cache is None:
-                    raise RuntimeError("RequestScope is not active")
-                if key not in self._cache:
-                    self._cache[key] = provider.get(self.injector)
-                return InstanceProvider(self._cache[key])
-
-        request_scope = ScopeDecorator(RequestScope)
+    def _build_module(self) -> Any:
+        from injector import Binder, Module, provider, singleton, threadlocal
 
         class BenchModule(Module):
             def configure(self, binder: Binder) -> None:
@@ -445,7 +505,7 @@ class InjectorAdapter(ExternalAdapter):
                 return SystemClock()
 
             @provider
-            @request_scope
+            @threadlocal
             def provide_repository(self, clock: Clock, settings: Settings) -> Repository:
                 return Repository(clock, settings)
 
@@ -453,45 +513,48 @@ class InjectorAdapter(ExternalAdapter):
             def provide_service(self, repository: Repository) -> Service:
                 return Service(repository)
 
-        return BenchModule(), RequestScope, inject
+        return BenchModule()
 
-    def _injector(self) -> tuple[Any, type[Any], Callable[[Callable[..., Any]], Callable[..., Any]]]:
+    def _injector(self, module_state: Any | None = None) -> Any:
         from injector import Injector
 
-        module, request_scope, inject = self._build_module()
-        return Injector([module], auto_bind=False), request_scope, inject
+        module = module_state or self._build_module()
+        return Injector([module], auto_bind=False)
 
-    @contextmanager
-    def _request_context(self, state: tuple[Any, type[Any], Callable[[Callable[..., Any]], Callable[..., Any]]]):
-        injector, request_scope, _inject = state
-        scope = injector.get(request_scope)
-        scope.enter()
-        try:
-            yield injector
-        finally:
-            scope.exit()
-
-    def _validate(self, state: tuple[Any, type[Any], Callable[[Callable[..., Any]], Callable[..., Any]]]) -> None:
-        injector, _request_scope, _inject = state
+    def _validate(self, injector: Any) -> None:
         injector.get(Clock)
         injector.get(list[Plugin])
-        with self._request_context(state):
-            injector.get(Repository)
-            injector.get(Service)
+        injector.get(Repository)
+        injector.get(Service)
 
-    def _scoped_get(self, state: tuple[Any, type[Any], Callable[[Callable[..., Any]], Callable[..., Any]]]) -> Any:
-        with self._request_context(state) as injector:
-            return injector.get(Repository)
+    def _start_ready(self, module: Any) -> Any:
+        injector = self._injector(module)
+        injector.get(Clock)
+        injector.get(list[Plugin])
+        injector.get(Repository)
+        injector.get(Service)
+        return injector
 
-    def _call(self, state: tuple[Any, type[Any], Callable[[Callable[..., Any]], Callable[..., Any]]]) -> int:
-        injector, _request_scope, inject = state
+    def _scoped_get(self, injector: Any) -> Any:
+        return injector.get(Repository)
+
+    def _injected_handler(self) -> Callable[..., int]:
+        if self._cached_handler is not None:
+            return self._cached_handler
+        inject = importlib.import_module("injector").inject
 
         @inject
         def handler(service: Service, repository: Repository, plugins: list[Plugin]) -> int:
             return benchmark_handler(service, repository, plugins)
 
-        with self._request_context(state):
-            return injector.call_with_injection(handler)
+        self._cached_handler = handler
+        return handler
+
+    def _call(self, injector: Any) -> int:
+        return injector.call_with_injection(self._injected_handler())
+
+    def _request_cycle(self, injector: Any) -> int:
+        return benchmark_handler(injector.get(Service), injector.get(Repository), injector.get(list[Plugin]))
 
     def _run(self, *, repeat: int, iterations: int) -> LibraryResult:
         metrics = [
@@ -509,7 +572,15 @@ class InjectorAdapter(ExternalAdapter):
                 iterations=iterations,
                 repeat=repeat,
                 setup=self._build_module,
-                operation=lambda _module: self._injector(),
+                operation=self._injector,
+            ),
+            benchmark_metric(
+                "start_ready",
+                "seconds/op",
+                iterations=iterations,
+                repeat=repeat,
+                setup=self._build_module,
+                operation=self._start_ready,
             ),
             benchmark_metric(
                 "validate",
@@ -525,7 +596,7 @@ class InjectorAdapter(ExternalAdapter):
                 iterations=iterations * 200,
                 repeat=repeat,
                 setup=self._injector,
-                operation=lambda state: state[0].get(Clock),
+                operation=lambda injector: injector.get(Clock),
             ),
             benchmark_metric(
                 "scoped_get",
@@ -541,7 +612,7 @@ class InjectorAdapter(ExternalAdapter):
                 iterations=iterations * 100,
                 repeat=repeat,
                 setup=self._injector,
-                operation=lambda state: state[0].get(list[Plugin]),
+                operation=lambda injector: injector.get(list[Plugin]),
             ),
             benchmark_metric(
                 "call",
@@ -550,6 +621,14 @@ class InjectorAdapter(ExternalAdapter):
                 repeat=repeat,
                 setup=self._injector,
                 operation=self._call,
+            ),
+            benchmark_metric(
+                "request_cycle",
+                "seconds/op",
+                iterations=iterations * 100,
+                repeat=repeat,
+                setup=self._injector,
+                operation=self._request_cycle,
             ),
         ]
         return LibraryResult(
@@ -571,13 +650,13 @@ class LagomAdapter(ExternalAdapter):
             Settings: Settings(debug=True, region="eu-west"),
             Repository: lambda container: Repository(container[Clock], container[Settings]),
             Service: lambda container: Service(container[Repository]),
-            PluginBundle: lambda _container: PluginBundle((AlphaPlugin(), BetaPlugin(), GammaPlugin())),
+            list[Plugin]: [AlphaPlugin(), BetaPlugin(), GammaPlugin()],
         }
 
-    def _container(self) -> Any:
+    def _container(self, definitions: dict[Any, Any] | None = None) -> Any:
         lagom = importlib.import_module("lagom")
         container = lagom.Container()
-        for key, definition in self._definitions().items():
+        for key, definition in (definitions or self._definitions()).items():
             container[key] = definition
         return container
 
@@ -585,17 +664,26 @@ class LagomAdapter(ExternalAdapter):
         container[Clock]
         container[Repository]
         container[Service]
-        container[PluginBundle]
+        container[list[Plugin]]
 
-    def _call(self, container: Any) -> int:
-        magic_partial = getattr(container, "magic_partial", None)
-        if callable(magic_partial):
-            def handler(service: Service, repository: Repository, plugins: PluginBundle) -> int:
-                return benchmark_handler(service, repository, list(plugins.items))
+    def _start_ready(self, definitions: dict[Any, Any]) -> Any:
+        container = self._container(definitions)
+        container[Clock]
+        container[list[Plugin]]
+        container[Repository]
+        container[Service]
+        return container
 
-            return magic_partial(handler)()
-        bundle = container[PluginBundle]
-        return benchmark_handler(container[Service], container[Repository], list(bundle.items))
+    def _call_state(self) -> tuple[Any, Callable[[], int]]:
+        container = self._container()
+
+        def handler(service: Service, repository: Repository, plugins: list[Plugin]) -> int:
+            return benchmark_handler(service, repository, plugins)
+
+        return container, container.magic_partial(handler, shared=[Repository])
+
+    def _request_cycle(self, container: Any) -> int:
+        return benchmark_handler(container[Service], container[Repository], container[list[Plugin]])
 
     def _run(self, *, repeat: int, iterations: int) -> LibraryResult:
         metrics = [
@@ -612,8 +700,16 @@ class LagomAdapter(ExternalAdapter):
                 "seconds/op",
                 iterations=iterations,
                 repeat=repeat,
-                setup=lambda: None,
-                operation=lambda _state: self._container(),
+                setup=self._definitions,
+                operation=self._container,
+            ),
+            benchmark_metric(
+                "start_ready",
+                "seconds/op",
+                iterations=iterations,
+                repeat=repeat,
+                setup=self._definitions,
+                operation=self._start_ready,
             ),
             benchmark_metric(
                 "validate",
@@ -645,15 +741,23 @@ class LagomAdapter(ExternalAdapter):
                 iterations=iterations * 100,
                 repeat=repeat,
                 setup=self._container,
-                operation=lambda container: container[PluginBundle].items,
+                operation=lambda container: container[list[Plugin]],
             ),
             benchmark_metric(
                 "call",
                 "seconds/op",
                 iterations=iterations * 100,
                 repeat=repeat,
+                setup=self._call_state,
+                operation=lambda state: state[1](),
+            ),
+            benchmark_metric(
+                "request_cycle",
+                "seconds/op",
+                iterations=iterations * 100,
+                repeat=repeat,
                 setup=self._container,
-                operation=self._call,
+                operation=self._request_cycle,
             ),
         ]
         return LibraryResult(
@@ -669,16 +773,22 @@ class PunqAdapter(ExternalAdapter):
     def __init__(self) -> None:
         super().__init__("punq", "punq")
 
-    def _container(self) -> Any:
+    def _registrations(self) -> tuple[tuple[Any, tuple[Any, ...], dict[str, Any]], ...]:
+        return (
+            (Settings, (), {"instance": Settings(debug=True, region="eu-west")}),
+            (Clock, (), {"instance": SystemClock()}),
+            (Repository, (), {}),
+            (Service, (), {}),
+            (Plugin, (AlphaPlugin,), {}),
+            (Plugin, (BetaPlugin,), {}),
+            (Plugin, (GammaPlugin,), {}),
+        )
+
+    def _container(self, registrations: tuple[tuple[Any, tuple[Any, ...], dict[str, Any]], ...] | None = None) -> Any:
         punq = importlib.import_module("punq")
         container = punq.Container()
-        container.register(Settings, instance=Settings(debug=True, region="eu-west"))
-        container.register(Clock, SystemClock, scope=punq.Scope.singleton)
-        container.register(Repository, Repository, scope=punq.Scope.transient)
-        container.register(Service, Service, scope=punq.Scope.transient)
-        container.register(Plugin, AlphaPlugin)
-        container.register(Plugin, BetaPlugin)
-        container.register(Plugin, GammaPlugin)
+        for service, args, kwargs in registrations or self._registrations():
+            container.register(service, *args, **kwargs)
         return container
 
     def _validate(self, container: Any) -> None:
@@ -687,11 +797,26 @@ class PunqAdapter(ExternalAdapter):
         container.resolve(Service)
         container.resolve_all(Plugin)
 
+    def _start_ready(self, registrations: tuple[tuple[Any, tuple[Any, ...], dict[str, Any]], ...]) -> Any:
+        container = self._container(registrations)
+        container.resolve(Clock)
+        container.resolve(list[Plugin])
+        container.resolve(Repository)
+        container.resolve(Service)
+        return container
+
     def _call(self, container: Any) -> int:
         return benchmark_handler(
             container.resolve(Service),
             container.resolve(Repository),
             list(container.resolve_all(Plugin)),
+        )
+
+    def _request_cycle(self, container: Any) -> int:
+        return benchmark_handler(
+            container.resolve(Service),
+            container.resolve(Repository),
+            container.resolve(list[Plugin]),
         )
 
     def _run(self, *, repeat: int, iterations: int) -> LibraryResult:
@@ -702,23 +827,23 @@ class PunqAdapter(ExternalAdapter):
                 iterations=iterations,
                 repeat=repeat,
                 setup=lambda: None,
-                operation=lambda _state: (
-                    (Settings, "instance"),
-                    (Clock, SystemClock),
-                    (Repository, Repository),
-                    (Service, Service),
-                    (Plugin, AlphaPlugin),
-                    (Plugin, BetaPlugin),
-                    (Plugin, GammaPlugin),
-                ),
+                operation=lambda _state: self._registrations(),
             ),
             benchmark_metric(
                 "start",
                 "seconds/op",
                 iterations=iterations,
                 repeat=repeat,
-                setup=lambda: None,
-                operation=lambda _state: self._container(),
+                setup=self._registrations,
+                operation=self._container,
+            ),
+            benchmark_metric(
+                "start_ready",
+                "seconds/op",
+                iterations=iterations,
+                repeat=repeat,
+                setup=self._registrations,
+                operation=self._start_ready,
             ),
             benchmark_metric(
                 "validate",
@@ -760,6 +885,14 @@ class PunqAdapter(ExternalAdapter):
                 setup=self._container,
                 operation=self._call,
             ),
+            benchmark_metric(
+                "request_cycle",
+                "seconds/op",
+                iterations=iterations * 100,
+                repeat=repeat,
+                setup=self._container,
+                operation=self._request_cycle,
+            ),
         ]
         return LibraryResult(
             library=self.library,
@@ -776,59 +909,77 @@ class DishkaAdapter(ExternalAdapter):
 
     def _provider(self) -> Any:
         dishka = importlib.import_module("dishka")
+        collect = dishka.collect
+        from_context = dishka.from_context
         Provider = dishka.Provider
         Scope = dishka.Scope
         provide = dishka.provide
 
         class BenchProvider(Provider):
-            @provide(scope=Scope.APP)
-            def clock(self) -> Clock:
-                return SystemClock()
-
-            @provide(scope=Scope.APP)
-            def settings(self) -> Settings:
-                return Settings(debug=True, region="eu-west")
-
-            @provide(scope=Scope.REQUEST)
-            def repository(self, clock: Clock, settings: Settings) -> Repository:
-                return Repository(clock, settings)
-
-            @provide(scope=Scope.REQUEST)
-            def service(self, repository: Repository) -> Service:
-                return Service(repository)
-
-            @provide(scope=Scope.APP)
-            def plugins(self) -> PluginBundle:
-                return PluginBundle((AlphaPlugin(), BetaPlugin(), GammaPlugin()))
+            scope = Scope.APP
+            clock = provide(source=SystemClock, provides=Clock)
+            settings = from_context(provides=Settings)
+            repository = provide(Repository, scope=Scope.REQUEST)
+            service = provide(Service, scope=Scope.REQUEST)
+            alpha = provide(AlphaPlugin, provides=Plugin)
+            beta = provide(BetaPlugin, provides=Plugin)
+            gamma = provide(GammaPlugin, provides=Plugin)
+            plugins = collect(Plugin)
 
         return BenchProvider()
 
     def _container(self) -> Any:
         dishka = importlib.import_module("dishka")
-        return dishka.make_container(self._provider())
+        return dishka.make_container(
+            self._provider(),
+            context={Settings: Settings(debug=True, region="eu-west")},
+        )
 
     def _validate(self, container: Any) -> None:
         container.get(Clock)
-        container.get(PluginBundle)
+        container.get(list[Plugin])
         with container() as request_container:
             request_container.get(Repository)
             request_container.get(Service)
+
+    def _start_ready(self, provider: Any) -> Any:
+        container = importlib.import_module("dishka").make_container(
+            provider,
+            context={Settings: Settings(debug=True, region="eu-west")},
+        )
+        container.get(Clock)
+        container.get(list[Plugin])
+        with container() as request_container:
+            request_container.get(Repository)
+            request_container.get(Service)
+        return container
 
     def _scoped_get(self, container: Any) -> Any:
         with container() as request_container:
             return request_container.get(Repository)
 
-    def _call(self, container: Any) -> int:
-        with container() as request_container:
-            bundle = request_container.get(PluginBundle)
-            return benchmark_handler(
-                request_container.get(Service),
-                request_container.get(Repository),
-                list(bundle.items),
-            )
-
     def _close(self, container: Any) -> None:
-        _call_maybe(container, "close")
+        container.close()
+
+    def _call_state(self) -> tuple[Any, Callable[[], int]]:
+        dishka = importlib.import_module("dishka")
+        base = importlib.import_module("dishka.integrations.base")
+        container = self._container()
+        wrap_injection = base.wrap_injection
+
+        wrapped = wrap_injection(
+            func=dishka_benchmark_handler,
+            container_getter=lambda _args, _kwargs: container,
+            is_async=False,
+            manage_scope=True,
+            scope=dishka.Scope.REQUEST,
+        )
+        return container, wrapped
+
+    def _request_cycle(self, container: Any) -> int:
+        plugins = container.get(list[Plugin])
+        with container() as request_container:
+            return benchmark_handler(request_container.get(Service), request_container.get(Repository), plugins)
 
     def _run(self, *, repeat: int, iterations: int) -> LibraryResult:
         metrics = [
@@ -846,7 +997,19 @@ class DishkaAdapter(ExternalAdapter):
                 iterations=iterations,
                 repeat=repeat,
                 setup=self._provider,
-                operation=lambda provider: importlib.import_module("dishka").make_container(provider),
+                operation=lambda provider: importlib.import_module("dishka").make_container(
+                    provider,
+                    context={Settings: Settings(debug=True, region="eu-west")},
+                ),
+                cleanup=lambda _provider, container: self._close(container),
+            ),
+            benchmark_metric(
+                "start_ready",
+                "seconds/op",
+                iterations=iterations,
+                repeat=repeat,
+                setup=self._provider,
+                operation=self._start_ready,
                 cleanup=lambda _provider, container: self._close(container),
             ),
             benchmark_metric(
@@ -882,7 +1045,7 @@ class DishkaAdapter(ExternalAdapter):
                 iterations=iterations * 100,
                 repeat=repeat,
                 setup=self._container,
-                operation=lambda container: container.get(PluginBundle).items,
+                operation=lambda container: container.get(list[Plugin]),
                 cleanup=lambda container, _value: self._close(container),
             ),
             benchmark_metric(
@@ -890,8 +1053,17 @@ class DishkaAdapter(ExternalAdapter):
                 "seconds/op",
                 iterations=iterations * 100,
                 repeat=repeat,
+                setup=self._call_state,
+                operation=lambda state: state[1](),
+                cleanup=lambda state, _value: self._close(state[0]),
+            ),
+            benchmark_metric(
+                "request_cycle",
+                "seconds/op",
+                iterations=iterations * 100,
+                repeat=repeat,
                 setup=self._container,
-                operation=self._call,
+                operation=self._request_cycle,
                 cleanup=lambda container, _value: self._close(container),
             ),
         ]
@@ -908,30 +1080,9 @@ class WireupAdapter(ExternalAdapter):
     def __init__(self) -> None:
         super().__init__("wireup", "wireup")
 
-    def _service_decorator(self, wireup: Any) -> Callable[..., Any]:
-        decorator = getattr(wireup, "injectable", None) or getattr(wireup, "service", None)
-        if decorator is None:
-            raise RuntimeError("Wireup service decorator is not available")
-        return decorator
-
-    def _apply_service(self, decorator: Callable[..., Any], target: Any, *, as_type: Any | None = None, lifetime: str | None = None) -> Any:
-        kwargs: dict[str, Any] = {}
-        parameters = inspect.signature(decorator).parameters
-        if as_type is not None:
-            if "as_type" in parameters:
-                kwargs["as_type"] = as_type
-            elif "provides" in parameters:
-                kwargs["provides"] = as_type
-        if lifetime is not None and "lifetime" in parameters:
-            kwargs["lifetime"] = lifetime
-        try:
-            return decorator(target, **kwargs)
-        except TypeError:
-            return decorator(**kwargs)(target)
-
     def _entries(self) -> list[Any]:
         wireup = importlib.import_module("wireup")
-        decorate = self._service_decorator(wireup)
+        decorate = wireup.injectable
 
         class WireClock(SystemClock):
             pass
@@ -945,60 +1096,56 @@ class WireupAdapter(ExternalAdapter):
         def build_settings() -> Settings:
             return Settings(debug=True, region="eu-west")
 
-        def build_plugins(alpha: AlphaPlugin, beta: BetaPlugin, gamma: GammaPlugin) -> PluginBundle:
-            return PluginBundle((alpha, beta, gamma))
+        def build_plugins(alpha: AlphaPlugin, beta: BetaPlugin, gamma: GammaPlugin) -> list[Plugin]:
+            return [alpha, beta, gamma]
 
         return [
-            self._apply_service(decorate, WireClock, as_type=Clock, lifetime="singleton"),
-            self._apply_service(decorate, build_settings, as_type=Settings, lifetime="singleton"),
-            self._apply_service(decorate, WireRepository, as_type=Repository, lifetime="scoped"),
-            self._apply_service(decorate, WireService, as_type=Service, lifetime="transient"),
-            self._apply_service(decorate, AlphaPlugin, lifetime="singleton"),
-            self._apply_service(decorate, BetaPlugin, lifetime="singleton"),
-            self._apply_service(decorate, GammaPlugin, lifetime="singleton"),
-            self._apply_service(decorate, build_plugins, as_type=PluginBundle, lifetime="singleton"),
+            decorate(WireClock, as_type=Clock, lifetime="singleton"),
+            decorate(build_settings, as_type=Settings, lifetime="singleton"),
+            decorate(WireRepository, as_type=Repository, lifetime="scoped"),
+            decorate(WireService, as_type=Service, lifetime="transient"),
+            decorate(AlphaPlugin, lifetime="singleton"),
+            decorate(BetaPlugin, lifetime="singleton"),
+            decorate(GammaPlugin, lifetime="singleton"),
+            decorate(build_plugins, as_type=list[Plugin], lifetime="singleton"),
         ]
 
-    def _container(self) -> Any:
+    def _container(self, entries: list[Any] | None = None) -> Any:
         wireup = importlib.import_module("wireup")
-        factory = getattr(wireup, "create_sync_container", None)
-        if factory is None:
-            raise RuntimeError("wireup.create_sync_container is not available")
-        parameters = inspect.signature(factory).parameters
-        if "injectables" in parameters:
-            return factory(injectables=self._entries())
-        if "services" in parameters:
-            return factory(services=self._entries())
-        return factory(self._entries())
-
-    @contextmanager
-    def _scope(self, container: Any):
-        enter_scope = getattr(container, "enter_scope", None)
-        if callable(enter_scope):
-            with enter_scope() as scoped:
-                yield scoped
-            return
-        with nullcontext(container) as scoped:
-            yield scoped
+        return wireup.create_sync_container(injectables=entries or self._entries())
 
     def _validate(self, container: Any) -> None:
         container.get(Clock)
-        container.get(PluginBundle)
-        with self._scope(container) as scoped:
+        container.get(list[Plugin])
+        with container.enter_scope() as scoped:
             scoped.get(Repository)
             scoped.get(Service)
 
+    def _start_ready(self, entries: list[Any]) -> Any:
+        container = self._container(entries)
+        container.get(Clock)
+        container.get(list[Plugin])
+        with container.enter_scope() as scoped:
+            scoped.get(Repository)
+            scoped.get(Service)
+        return container
+
     def _scoped_get(self, container: Any) -> Any:
-        with self._scope(container) as scoped:
+        with container.enter_scope() as scoped:
             return scoped.get(Repository)
 
-    def _call(self, container: Any) -> int:
-        with self._scope(container) as scoped:
-            bundle = scoped.get(PluginBundle)
-            return benchmark_handler(scoped.get(Service), scoped.get(Repository), list(bundle.items))
+    def _call_state(self) -> tuple[Any, Callable[[], int]]:
+        wireup = importlib.import_module("wireup")
+        container = self._container()
+        return container, wireup.inject_from_container(container)(wireup_benchmark_handler)
+
+    def _request_cycle(self, container: Any) -> int:
+        plugins = container.get(list[Plugin])
+        with container.enter_scope() as scoped:
+            return benchmark_handler(scoped.get(Service), scoped.get(Repository), plugins)
 
     def _close(self, container: Any) -> None:
-        _call_maybe(container, "close", "shutdown")
+        container.close()
 
     def _run(self, *, repeat: int, iterations: int) -> LibraryResult:
         metrics = [
@@ -1015,9 +1162,18 @@ class WireupAdapter(ExternalAdapter):
                 "seconds/op",
                 iterations=iterations,
                 repeat=repeat,
-                setup=lambda: None,
-                operation=lambda _state: self._container(),
-                cleanup=lambda _state, container: self._close(container),
+                setup=self._entries,
+                operation=self._container,
+                cleanup=lambda _entries, container: self._close(container),
+            ),
+            benchmark_metric(
+                "start_ready",
+                "seconds/op",
+                iterations=iterations,
+                repeat=repeat,
+                setup=self._entries,
+                operation=self._start_ready,
+                cleanup=lambda _entries, container: self._close(container),
             ),
             benchmark_metric(
                 "validate",
@@ -1052,7 +1208,7 @@ class WireupAdapter(ExternalAdapter):
                 iterations=iterations * 100,
                 repeat=repeat,
                 setup=self._container,
-                operation=lambda container: container.get(PluginBundle).items,
+                operation=lambda container: container.get(list[Plugin]),
                 cleanup=lambda container, _value: self._close(container),
             ),
             benchmark_metric(
@@ -1060,8 +1216,17 @@ class WireupAdapter(ExternalAdapter):
                 "seconds/op",
                 iterations=iterations * 100,
                 repeat=repeat,
+                setup=self._call_state,
+                operation=lambda state: state[1](),
+                cleanup=lambda state, _value: self._close(state[0]),
+            ),
+            benchmark_metric(
+                "request_cycle",
+                "seconds/op",
+                iterations=iterations * 100,
+                repeat=repeat,
                 setup=self._container,
-                operation=self._call,
+                operation=self._request_cycle,
                 cleanup=lambda container, _value: self._close(container),
             ),
         ]
